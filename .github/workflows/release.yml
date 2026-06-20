@@ -58,7 +58,7 @@ jobs:
         run: cargo test --all-features --locked
 
       - name: Crate publish dry run
-        run: cargo publish --manifest-path source/Cargo.toml --locked --allow-dirty
+        run: cargo publish --manifest-path source/Cargo.toml --locked --allow-dirty --dry-run
 
       - name: Authenticate with crates.io
         id: auth
