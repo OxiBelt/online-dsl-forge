@@ -64,5 +64,76 @@
       "request_body": "size_only",
       "response_body": "prefix_bytes"
     }
+  },
+  {
+    "id": "function_body_binding_propagates_size_only_need",
+    "origin": "/references/OxiBelt/source/src/waf/plan.rs:299",
+    "expression": "has_size(Request.Body)",
+    "functions": [
+      {
+        "name": "has_size",
+        "params": ["body"],
+        "expression": "body.Size > 0"
+      }
+    ],
+    "expected": {
+      "request_body": "size_only",
+      "response_body": "none"
+    }
+  },
+  {
+    "id": "nested_function_body_binding_keeps_prefix_need",
+    "origin": "/references/OxiBelt/source/src/waf/plan.rs:312",
+    "expression": "outer(Request.Body)",
+    "functions": [
+      {
+        "name": "inner",
+        "params": ["body"],
+        "expression": "body.Text.contains(\"secret\")"
+      },
+      {
+        "name": "outer",
+        "params": ["body"],
+        "expression": "inner(body)"
+      }
+    ],
+    "expected": {
+      "request_body": "prefix_bytes",
+      "response_body": "none"
+    }
+  },
+  {
+    "id": "stream_payload_tracks_stream_body_need",
+    "origin": "/references/OxiBelt/source/src/waf/plan.rs:160",
+    "profile": "waf_stream",
+    "expression": "Stream.Payload.Text.contains(\"secret\")",
+    "functions": [],
+    "expected": {
+      "request_body": "none",
+      "response_body": "none",
+      "stream_body": "prefix_bytes"
+    }
+  },
+  {
+    "id": "local_function_override_changes_body_need",
+    "origin": "/references/OxiBelt/docs/OxiRule.md:126",
+    "expression": "has_secret(Request.Body)",
+    "functions": [
+      {
+        "name": "has_secret",
+        "params": ["body"],
+        "expression": "body.Size > 0"
+      },
+      {
+        "scope": "local",
+        "name": "has_secret",
+        "params": ["body"],
+        "expression": "body.Text.contains(\"secret\")"
+      }
+    ],
+    "expected": {
+      "request_body": "prefix_bytes",
+      "response_body": "none"
+    }
   }
 ]

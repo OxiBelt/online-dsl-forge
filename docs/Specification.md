@@ -75,13 +75,24 @@ and security profile. Validation covers:
 - unknown variables unless explicitly allowed by `CompileOptions`
 - unknown functions
 - function arity
+- expression-function graph validation, including invalid parameters,
+  recursion, and scoped local-over-global resolution
 - unknown methods unless explicitly allowed by `CompileOptions`
 - method arity when a method signature is registered
 - capability phase availability
 - request, response, and stream body-access inference
-- WAF profile restrictions such as request-phase rejection of `Response`
+- WAF profile restrictions such as request-phase rejection of `Response` and
+  stream-phase rejection of `Request.Body`
+- mitigation-field restrictions that reject `Request.Body`, `Response.Body`,
+  or `Stream.Payload` access, including through expression functions
 - regex admission policy and literal regex precompilation for strict profiles
 - static AST node, call-depth, and cost limits
+
+Expression functions are sema-only helpers. The default analysis scope admits
+local functions first and then global functions, matching route-local override
+behavior in OxiBelt-like hosts. Global function bodies resolve nested calls
+against global functions only; local function bodies resolve nested calls
+against local functions first and then global functions.
 
 The compatibility `compile_expression` API uses the generic safe profile and
 returns a `CompiledExpression` backed by sema's verified program.

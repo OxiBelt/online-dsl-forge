@@ -11,6 +11,7 @@ pub(super) struct ExprAnalysis {
   pub origin: Option<ObjectOrigin>,
   pub path: Option<Vec<String>>,
   pub body_need: BodyNeedSummary,
+  pub mitigation_payload: bool,
   pub nodes: usize,
   pub cost: u64,
 }
@@ -29,6 +30,7 @@ impl ExprAnalysis {
       origin,
       path,
       body_need,
+      mitigation_payload: false,
       nodes,
       cost,
     }
@@ -42,11 +44,17 @@ impl ExprAnalysis {
     self.path = Some(path);
     self
   }
+
+  pub fn with_mitigation_payload(mut self, value: bool) -> Self {
+    self.mitigation_payload = value;
+    self
+  }
 }
 
 pub(super) struct ArgsAnalysis {
   pub exprs: Vec<VerifiedExpression>,
   pub body_need: BodyNeedSummary,
+  pub mitigation_payload: bool,
   pub nodes: usize,
   pub cost: u64,
 }
@@ -82,6 +90,13 @@ impl ObjectOrigin {
       Self::StreamPayload => Some(BodyTarget::Stream),
       _ => None,
     }
+  }
+
+  pub fn is_mitigation_payload_boundary(self) -> bool {
+    matches!(
+      self,
+      Self::RequestBody | Self::ResponseBody | Self::StreamPayload
+    )
   }
 }
 

@@ -196,29 +196,24 @@ fn deferred_body_need_fixtures_match_sema_analysis() {
     let mut schema = RuntimeSchema::waf();
 
     for function in required_array(&case, "functions") {
-      let function_name = required_str(function, "name");
-      assert!(
-        !required_array(function, "params").is_empty(),
-        "{id}: function {function_name} should list params"
-      );
-      let function_expression = parse_expression(required_str(function, "expression"))
-        .unwrap_or_else(|error| {
-          panic!("{id}: function {function_name} expression should parse, got {error}");
-        });
-      schema.add_expression_function(
-        function_name,
-        required_array(function, "params")
-          .iter()
-          .map(|param| param.as_str().expect("function params must be strings")),
-        function_expression,
-      );
+      add_fixture_expression_function(&mut schema, id, function);
     }
 
     let expected = required_value(&case, "expected");
     assert_body_need(id, required_str(expected, "request_body"));
     assert_body_need(id, required_str(expected, "response_body"));
+    let expected_stream_body = expected
+      .get("stream_body")
+      .and_then(JsonValue::as_str)
+      .unwrap_or("none");
+    assert_body_need(id, expected_stream_body);
 
-    let verified = Analyzer::new(SecurityProfile::generic_safe())
+    let profile = case
+      .get("profile")
+      .and_then(JsonValue::as_str)
+      .map(sema_profile)
+      .unwrap_or_else(SecurityProfile::generic_safe);
+    let verified = Analyzer::new(profile)
       .analyze(&ast, &schema)
       .unwrap_or_else(|error| panic!("{id}: body-need expression should analyze, got {error}"));
     let actual = verified.body_need();
@@ -231,6 +226,11 @@ fn deferred_body_need_fixtures_match_sema_analysis() {
       actual.response,
       body_access(required_str(expected, "response_body")),
       "{id}: response body need changed"
+    );
+    assert_eq!(
+      actual.stream,
+      body_access(expected_stream_body),
+      "{id}: stream body need changed"
     );
   }
 }
@@ -335,7 +335,40 @@ fn sema_schema(value: &JsonValue) -> RuntimeSchema {
     }
   }
 
+  if let Some(functions) = value
+    .get("expression_functions")
+    .and_then(JsonValue::as_array)
+  {
+    for function in functions {
+      add_fixture_expression_function(&mut schema, "sema fixture", function);
+    }
+  }
+
   schema
+}
+
+fn add_fixture_expression_function(schema: &mut RuntimeSchema, id: &str, function: &JsonValue) {
+  let function_name = required_str(function, "name");
+  let function_expression =
+    parse_expression(required_str(function, "expression")).unwrap_or_else(|error| {
+      panic!("{id}: function {function_name} expression should parse, got {error}");
+    });
+  let params = required_array(function, "params")
+    .iter()
+    .map(|param| param.as_str().expect("function params must be strings"));
+  match function
+    .get("scope")
+    .and_then(JsonValue::as_str)
+    .unwrap_or("global")
+  {
+    "global" => {
+      schema.add_expression_function(function_name, params, function_expression);
+    }
+    "local" => {
+      schema.add_local_expression_function(function_name, params, function_expression);
+    }
+    other => panic!("{id}: unknown function scope {other}"),
+  }
 }
 
 fn sema_profile(value: &str) -> SecurityProfile {

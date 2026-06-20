@@ -9,9 +9,9 @@ pub mod value;
 pub use compile::{
   Analyzer, BodyAccess, BodyNeedSummary, BodyPathRule, BodyTarget, CapabilityKind, CapabilityMeta,
   CapabilityTicket, CompileOptions, CompiledExpression, CostModel, Determinism, ExpressionFunction,
-  Phase, RegexArgMeta, RegexFlavor, RegexPolicy, RuntimeSchema, SecurityProfile, SecurityProfileId,
-  SignatureMatch, TypeClass, VariableMeta, VerifiedExprKindRef, VerifiedExpression,
-  VerifiedProgram, compile_expression,
+  ExpressionFunctionDiagnostic, ExpressionFunctionScope, Phase, RegexArgMeta, RegexFlavor,
+  RegexPolicy, RuntimeSchema, SecurityProfile, SecurityProfileId, SignatureMatch, TypeClass,
+  VariableMeta, VerifiedExprKindRef, VerifiedExpression, VerifiedProgram, compile_expression,
 };
 pub use parser::{
   AstExpression, BinaryOp, Diagnostic, DiagnosticReport, ExprKind, SourceSpan, UnaryOp, ast,

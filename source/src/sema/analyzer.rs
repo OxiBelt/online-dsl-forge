@@ -1,27 +1,25 @@
+mod body_need;
+mod functions;
+mod phase;
 mod support;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use crate::parser::{
   AstExpression, BinaryOp, Diagnostic, DiagnosticReport, ExprKind, SourceSpan, UnaryOp,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::sema::profile::{
-  BodyAccess, BodyNeedSummary, BodyTarget, Phase, RegexPolicy, SecurityProfile, SecurityProfileId,
-};
+use crate::sema::profile::{BodyNeedSummary, RegexPolicy, SecurityProfile, SecurityProfileId};
 use crate::sema::schema::{
-  CapabilityKind, CapabilityMeta, CapabilityTicket, ExpressionFunction, RuntimeSchema,
+  CapabilityKind, CapabilityMeta, CapabilityTicket, ExpressionFunctionScope, RuntimeSchema,
   SignatureMatch,
 };
 use crate::sema::verified::{
   CompiledExpression, CompiledRegexCache, RegexLiteral, VerifiedExprKind, VerifiedExpression,
   VerifiedProgram, VerifiedProgramParts,
 };
-use support::{
-  ArgsAnalysis, ExprAnalysis, ObjectOrigin, capability_kind_label, function_calls, member_origin,
-  string_literal, substitute_expression,
-};
+use support::{ArgsAnalysis, ExprAnalysis, ObjectOrigin, member_origin, string_literal};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CompileOptions {
@@ -34,6 +32,7 @@ pub struct CompileOptions {
 pub struct Analyzer {
   profile: SecurityProfile,
   options: CompileOptions,
+  expression_function_scope: ExpressionFunctionScope,
 }
 
 impl Analyzer {
@@ -41,11 +40,17 @@ impl Analyzer {
     Self {
       profile,
       options: CompileOptions::default(),
+      expression_function_scope: ExpressionFunctionScope::Local,
     }
   }
 
   pub fn with_options(mut self, options: CompileOptions) -> Self {
     self.options = options;
+    self
+  }
+
+  pub fn with_expression_function_scope(mut self, scope: ExpressionFunctionScope) -> Self {
+    self.expression_function_scope = scope;
     self
   }
 
@@ -94,7 +99,7 @@ struct AnalyzeState<'a> {
   regex_literals: Vec<RegexLiteral>,
   regex_cache: CompiledRegexCache,
   required_capabilities: BTreeSet<CapabilityTicket>,
-  active_functions: Vec<String>,
+  active_functions: Vec<(ExpressionFunctionScope, String)>,
 }
 
 impl<'a> AnalyzeState<'a> {
@@ -110,51 +115,6 @@ impl<'a> AnalyzeState<'a> {
     }
   }
 
-  fn validate_function_graph(&mut self) {
-    let mut permanent = HashSet::new();
-    let mut temporary = HashSet::new();
-    for function in self.schema.expression_functions() {
-      self.validate_function_node(function, &mut permanent, &mut temporary);
-    }
-  }
-
-  fn validate_function_node(
-    &mut self,
-    function: &ExpressionFunction,
-    permanent: &mut HashSet<String>,
-    temporary: &mut HashSet<String>,
-  ) {
-    if permanent.contains(&function.name) {
-      return;
-    }
-    if !temporary.insert(function.name.clone()) {
-      self.diagnostics.push(Diagnostic::new(
-        format!("recursive expression function {}", function.name),
-        function.expression.span,
-      ));
-      return;
-    }
-
-    for call in function_calls(&function.expression) {
-      let Some(callee) = self.schema.expression_function(&call.name) else {
-        continue;
-      };
-      if callee.params.len() != call.arity {
-        self.diagnostics.push(Diagnostic::new(
-          format!(
-            "function {} does not accept {} arguments",
-            call.name, call.arity
-          ),
-          call.span,
-        ));
-      }
-      self.validate_function_node(callee, permanent, temporary);
-    }
-
-    temporary.remove(&function.name);
-    permanent.insert(function.name.clone());
-  }
-
   fn validate_program_bounds(&mut self, analysis: &ExprAnalysis, span: SourceSpan) {
     if analysis.nodes > self.analyzer.profile.max_ast_nodes {
       self
@@ -167,7 +127,7 @@ impl<'a> AnalyzeState<'a> {
         .push(Diagnostic::new("static cost limit exceeded", span));
     }
     if matches!(self.analyzer.profile.id, SecurityProfileId::MitigationField)
-      && analysis.body_need.reads_payload()
+      && analysis.mitigation_payload
     {
       self.diagnostics.push(Diagnostic::new(
         "MitigationField cannot read request, response, or stream body bytes",
@@ -246,6 +206,7 @@ impl<'a> AnalyzeState<'a> {
     depth: usize,
   ) -> ExprAnalysis {
     let mut body_need = BodyNeedSummary::default();
+    let mut mitigation_payload = false;
     let mut nodes = 1;
     let mut cost = 1;
     let items = items
@@ -253,6 +214,7 @@ impl<'a> AnalyzeState<'a> {
       .map(|item| {
         let analysis = self.analyze_expression(item, depth + 1);
         body_need = body_need.merge(analysis.body_need);
+        mitigation_payload |= analysis.mitigation_payload;
         nodes += analysis.nodes;
         cost += analysis.cost;
         analysis.expr
@@ -266,6 +228,7 @@ impl<'a> AnalyzeState<'a> {
       nodes,
       cost,
     )
+    .with_mitigation_payload(mitigation_payload)
   }
 
   fn analyze_member(
@@ -292,6 +255,8 @@ impl<'a> AnalyzeState<'a> {
       body_need.merge_target(target, access);
     }
     self.validate_origin_phase(origin, span);
+    let mitigation_payload = receiver.mitigation_payload
+      || origin.is_some_and(ObjectOrigin::is_mitigation_payload_boundary);
 
     ExprAnalysis::new(
       VerifiedExpression::new(
@@ -307,6 +272,7 @@ impl<'a> AnalyzeState<'a> {
       receiver.nodes + 1,
       receiver.cost + 1,
     )
+    .with_mitigation_payload(mitigation_payload)
   }
 
   fn analyze_function_call(
@@ -316,7 +282,10 @@ impl<'a> AnalyzeState<'a> {
     span: SourceSpan,
     depth: usize,
   ) -> ExprAnalysis {
-    if let Some(function) = self.schema.expression_function(name) {
+    if let Some(function) = self
+      .schema
+      .expression_function_for_scope(name, self.current_function_scope())
+    {
       return self.analyze_expression_function(function, args, span, depth);
     }
 
@@ -352,56 +321,7 @@ impl<'a> AnalyzeState<'a> {
       args_analysis.nodes + 1,
       args_analysis.cost + capability.map_or(1, |capability| capability.cost.static_cost()),
     )
-  }
-
-  fn analyze_expression_function(
-    &mut self,
-    function: &ExpressionFunction,
-    args: &[AstExpression],
-    span: SourceSpan,
-    depth: usize,
-  ) -> ExprAnalysis {
-    if function.params.len() != args.len() {
-      self.diagnostics.push(Diagnostic::new(
-        format!(
-          "function {} does not accept {} arguments",
-          function.name,
-          args.len()
-        ),
-        span,
-      ));
-      return ExprAnalysis::leaf(
-        VerifiedExpression::new(
-          VerifiedExprKind::FunctionCall {
-            name: function.name.clone(),
-            args: Vec::new(),
-          },
-          span,
-        ),
-        None,
-      );
-    }
-    if self.active_functions.contains(&function.name) {
-      self.diagnostics.push(Diagnostic::new(
-        format!("recursive expression function {}", function.name),
-        span,
-      ));
-      return ExprAnalysis::leaf(VerifiedExpression::new(VerifiedExprKind::Null, span), None);
-    }
-
-    let replacements = function
-      .params
-      .iter()
-      .cloned()
-      .zip(args.iter().cloned())
-      .collect::<BTreeMap<_, _>>();
-    let substituted = substitute_expression(&function.expression, &replacements);
-    self.active_functions.push(function.name.clone());
-    let mut analysis = self.analyze_expression(&substituted, depth + 1);
-    self.active_functions.pop();
-    analysis.cost += 1;
-    analysis.nodes += 1;
-    analysis
+    .with_mitigation_payload(args_analysis.mitigation_payload)
   }
 
   fn analyze_method_call(
@@ -423,6 +343,7 @@ impl<'a> AnalyzeState<'a> {
     );
     let args_analysis = self.analyze_args(args, depth);
     let mut body_need = receiver.body_need.merge(args_analysis.body_need);
+    let mitigation_payload = receiver.mitigation_payload || args_analysis.mitigation_payload;
     if let Some(capability) = capability {
       self.validate_capability_phase(capability, span);
       self.validate_regex_args(capability, args, span);
@@ -451,6 +372,7 @@ impl<'a> AnalyzeState<'a> {
         + args_analysis.cost
         + capability.map_or(1, |capability| capability.cost.static_cost()),
     )
+    .with_mitigation_payload(mitigation_payload)
   }
 
   fn analyze_unary(
@@ -475,6 +397,7 @@ impl<'a> AnalyzeState<'a> {
       expr.nodes + 1,
       expr.cost + 1,
     )
+    .with_mitigation_payload(expr.mitigation_payload)
   }
 
   fn analyze_binary(
@@ -502,10 +425,12 @@ impl<'a> AnalyzeState<'a> {
       left.nodes + right.nodes + 1,
       left.cost + right.cost + 1,
     )
+    .with_mitigation_payload(left.mitigation_payload || right.mitigation_payload)
   }
 
   fn analyze_args(&mut self, args: &[AstExpression], depth: usize) -> ArgsAnalysis {
     let mut body_need = BodyNeedSummary::default();
+    let mut mitigation_payload = false;
     let mut nodes = 0;
     let mut cost = 0;
     let exprs = args
@@ -513,6 +438,7 @@ impl<'a> AnalyzeState<'a> {
       .map(|arg| {
         let analysis = self.analyze_expression(arg, depth + 1);
         body_need = body_need.merge(analysis.body_need);
+        mitigation_payload |= analysis.mitigation_payload;
         nodes += analysis.nodes;
         cost += analysis.cost;
         analysis.expr
@@ -521,6 +447,7 @@ impl<'a> AnalyzeState<'a> {
     ArgsAnalysis {
       exprs,
       body_need,
+      mitigation_payload,
       nodes,
       cost,
     }
@@ -557,68 +484,6 @@ impl<'a> AnalyzeState<'a> {
         ));
         None
       }
-    }
-  }
-
-  fn validate_variable_phase(&mut self, name: &str, span: SourceSpan) {
-    let Some(phase) = self.analyzer.profile.active_phase() else {
-      return;
-    };
-    if phase == Phase::Request && name == "Response" {
-      self.diagnostics.push(Diagnostic::new(
-        "Response is unavailable in request phase",
-        span,
-      ));
-    }
-    if phase != Phase::Stream && name == "Stream" {
-      self.diagnostics.push(Diagnostic::new(
-        "Stream is available only in stream phase",
-        span,
-      ));
-    }
-    if phase == Phase::Stream && name == "Response" {
-      self.diagnostics.push(Diagnostic::new(
-        "Response is unavailable in stream phase",
-        span,
-      ));
-    }
-    if let Some(variable) = self.schema.variable(name)
-      && !variable.is_available_in(phase)
-    {
-      self.diagnostics.push(Diagnostic::new(
-        format!("variable {name} is unavailable in {phase:?} phase"),
-        span,
-      ));
-    }
-  }
-
-  fn validate_capability_phase(&mut self, capability: &CapabilityMeta, span: SourceSpan) {
-    let Some(phase) = self.analyzer.profile.active_phase() else {
-      return;
-    };
-    if !capability.is_available_in(phase) {
-      self.diagnostics.push(Diagnostic::new(
-        format!(
-          "{} {} is unavailable in {phase:?} phase",
-          capability_kind_label(capability.kind),
-          capability.name
-        ),
-        span,
-      ));
-    }
-  }
-
-  fn validate_origin_phase(&mut self, origin: Option<ObjectOrigin>, span: SourceSpan) {
-    if self.analyzer.profile.active_phase() == Some(Phase::Stream)
-      && matches!(
-        origin,
-        Some(ObjectOrigin::RequestBody | ObjectOrigin::RequestBodyBytes)
-      )
-    {
-      self.diagnostics.push(Diagnostic::new(
-        "Request.Body is unavailable in stream phase",
-        span,
-      ));
     }
   }
 
@@ -673,52 +538,5 @@ impl<'a> AnalyzeState<'a> {
         }
       }
     }
-  }
-
-  fn merge_body_access_for_origin(
-    &self,
-    body_need: &mut BodyNeedSummary,
-    origin: Option<ObjectOrigin>,
-    field: &str,
-    span: SourceSpan,
-  ) {
-    let Some(origin) = origin else {
-      return;
-    };
-    match (origin, field) {
-      (ObjectOrigin::RequestBody, "Size") => {
-        body_need.merge_target(BodyTarget::Request, BodyAccess::SizeOnly)
-      }
-      (ObjectOrigin::ResponseBody, "Size") => {
-        body_need.merge_target(BodyTarget::Response, BodyAccess::SizeOnly)
-      }
-      (ObjectOrigin::RequestBody, "Bytes" | "Text" | "IsTruncated") => {
-        body_need.merge_target(BodyTarget::Request, BodyAccess::PrefixBytes)
-      }
-      (ObjectOrigin::ResponseBody, "Bytes" | "Text" | "IsTruncated") => {
-        body_need.merge_target(BodyTarget::Response, BodyAccess::PrefixBytes)
-      }
-      (ObjectOrigin::Stream, "Payload") => {
-        body_need.merge_target(BodyTarget::Stream, BodyAccess::PrefixBytes)
-      }
-      _ => {
-        let _ = span;
-      }
-    }
-  }
-
-  fn merge_body_access_for_method(
-    &self,
-    body_need: &mut BodyNeedSummary,
-    origin: Option<ObjectOrigin>,
-    capability: &CapabilityMeta,
-  ) {
-    let Some(origin) = origin else {
-      return;
-    };
-    let Some(target) = origin.body_target() else {
-      return;
-    };
-    body_need.merge_target(target, capability.body_access);
   }
 }

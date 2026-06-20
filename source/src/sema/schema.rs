@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::parser::{AstExpression, BinaryOp, UnaryOp};
+use crate::parser::{AstExpression, BinaryOp, Diagnostic, SourceSpan, UnaryOp};
 use serde::{Deserialize, Serialize};
 
 use crate::sema::profile::{BodyAccess, BodyTarget, Phase};
@@ -246,6 +246,46 @@ pub struct ExpressionFunction {
   pub name: String,
   pub params: Vec<String>,
   pub expression: AstExpression,
+  #[serde(default)]
+  pub scope: ExpressionFunctionScope,
+}
+
+#[derive(
+  Debug, Clone, Copy, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpressionFunctionScope {
+  #[default]
+  Global,
+  Local,
+}
+
+impl ExpressionFunctionScope {
+  pub fn call_scope(self) -> Self {
+    match self {
+      Self::Global => Self::Global,
+      Self::Local => Self::Local,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExpressionFunctionDiagnostic {
+  pub message: String,
+  pub span: SourceSpan,
+}
+
+impl ExpressionFunctionDiagnostic {
+  fn new(message: impl Into<String>, span: SourceSpan) -> Self {
+    Self {
+      message: message.into(),
+      span,
+    }
+  }
+
+  pub fn diagnostic(&self) -> Diagnostic {
+    Diagnostic::new(self.message.clone(), self.span)
+  }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
@@ -257,6 +297,10 @@ pub struct RuntimeSchema {
   binary_ops: BTreeMap<String, CapabilityMeta>,
   body_paths: Vec<BodyPathRule>,
   expression_functions: BTreeMap<String, ExpressionFunction>,
+  #[serde(default)]
+  local_expression_functions: BTreeMap<String, ExpressionFunction>,
+  #[serde(default)]
+  expression_function_diagnostics: Vec<ExpressionFunctionDiagnostic>,
 }
 
 impl RuntimeSchema {
@@ -271,17 +315,8 @@ impl RuntimeSchema {
       .add_variable("Response")
       .add_variable("Stream")
       .add_waf_body_paths()
-      .add_method_capability(
-        CapabilityMeta::method("contains", 1).with_body_access(BodyAccess::PrefixBytes),
-      )
-      .add_method_capability(
-        CapabilityMeta::method("containsBytes", 1).with_body_access(BodyAccess::PrefixBytes),
-      )
-      .add_method_capability(
-        CapabilityMeta::method("matches", 1)
-          .with_body_access(BodyAccess::PrefixBytes)
-          .with_regex_arg(0, RegexFlavor::Default),
-      );
+      .add_waf_body_methods()
+      .add_waf_regex_methods();
     schema
   }
 
@@ -366,8 +401,83 @@ impl RuntimeSchema {
     self
   }
 
+  pub fn add_waf_body_methods(&mut self) -> &mut Self {
+    for (name, arity) in [
+      ("isFormat", 1),
+      ("isBinaryFormat", 1),
+      ("matchesFormat", 1),
+      ("contains", 1),
+      ("containsBytes", 1),
+      ("containsAny", 1),
+      ("matchesAny", 1),
+      ("scan", 1),
+      ("anomalyScore", 1),
+      ("malformedScore", 1),
+      ("promptInjectionScore", 0),
+    ] {
+      self.add_method_capability(
+        CapabilityMeta::method(name, arity).with_body_access(BodyAccess::PrefixBytes),
+      );
+    }
+    self.add_method_capability(
+      CapabilityMeta::method("matches", 1)
+        .with_body_access(BodyAccess::PrefixBytes)
+        .with_regex_arg(0, RegexFlavor::Default),
+    );
+    self
+  }
+
+  pub fn add_waf_regex_methods(&mut self) -> &mut Self {
+    self
+      .add_method_capability(
+        CapabilityMeta::method("anyValueMatches", 1).with_regex_arg(0, RegexFlavor::Default),
+      )
+      .add_method_capability(
+        CapabilityMeta::method("anyKeyMatches", 1).with_regex_arg(0, RegexFlavor::Default),
+      )
+      .add_method_capability(
+        CapabilityMeta::method("anyMatches", 1).with_regex_arg(0, RegexFlavor::Default),
+      )
+      .add_method_capability(
+        CapabilityMeta::method("anyNameMatches", 1)
+          .with_regex_arg(0, RegexFlavor::Default)
+          .with_regex_arg(0, RegexFlavor::HeaderName),
+      )
+      .add_method_capability(
+        CapabilityMeta::method("anyEntryMatches", 2)
+          .with_regex_arg(0, RegexFlavor::Default)
+          .with_regex_arg(0, RegexFlavor::HeaderName)
+          .with_regex_arg(1, RegexFlavor::Default),
+      )
+      .add_method_capability(
+        CapabilityMeta::method("allEntriesMatch", 2)
+          .with_regex_arg(0, RegexFlavor::HeaderName)
+          .with_regex_arg(1, RegexFlavor::Default),
+      );
+    self
+  }
+
   pub fn add_expression_function(
     &mut self,
+    name: impl Into<String>,
+    params: impl IntoIterator<Item = impl Into<String>>,
+    expression: AstExpression,
+  ) -> &mut Self {
+    self.add_scoped_expression_function(ExpressionFunctionScope::Global, name, params, expression)
+  }
+
+  pub fn add_local_expression_function(
+    &mut self,
+    name: impl Into<String>,
+    params: impl IntoIterator<Item = impl Into<String>>,
+    expression: AstExpression,
+  ) -> &mut Self {
+    self.add_scoped_expression_function(ExpressionFunctionScope::Local, name, params, expression)
+  }
+
+  pub fn add_scoped_expression_function(
+    &mut self,
+    scope: ExpressionFunctionScope,
     name: impl Into<String>,
     params: impl IntoIterator<Item = impl Into<String>>,
     expression: AstExpression,
@@ -375,12 +485,25 @@ impl RuntimeSchema {
     let name = name.into();
     let params = params.into_iter().map(Into::into).collect::<Vec<_>>();
     self.add_function(name.clone(), params.len());
-    self.expression_functions.insert(
+    let target = match scope {
+      ExpressionFunctionScope::Global => &mut self.expression_functions,
+      ExpressionFunctionScope::Local => &mut self.local_expression_functions,
+    };
+    if target.contains_key(&name) {
+      self
+        .expression_function_diagnostics
+        .push(ExpressionFunctionDiagnostic::new(
+          format!("duplicate expression function {name} in {scope:?} scope"),
+          expression.span,
+        ));
+    }
+    target.insert(
       name.clone(),
       ExpressionFunction {
         name,
         params,
         expression,
+        scope,
       },
     );
     self
@@ -425,11 +548,32 @@ impl RuntimeSchema {
   }
 
   pub fn expression_function(&self, name: &str) -> Option<&ExpressionFunction> {
-    self.expression_functions.get(name)
+    self.expression_function_for_scope(name, ExpressionFunctionScope::Local)
+  }
+
+  pub fn expression_function_for_scope(
+    &self,
+    name: &str,
+    scope: ExpressionFunctionScope,
+  ) -> Option<&ExpressionFunction> {
+    match scope {
+      ExpressionFunctionScope::Global => self.expression_functions.get(name),
+      ExpressionFunctionScope::Local => self
+        .local_expression_functions
+        .get(name)
+        .or_else(|| self.expression_functions.get(name)),
+    }
   }
 
   pub fn expression_functions(&self) -> impl Iterator<Item = &ExpressionFunction> {
-    self.expression_functions.values()
+    self
+      .expression_functions
+      .values()
+      .chain(self.local_expression_functions.values())
+  }
+
+  pub fn expression_function_diagnostics(&self) -> &[ExpressionFunctionDiagnostic] {
+    &self.expression_function_diagnostics
   }
 }
 

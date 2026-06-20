@@ -12,7 +12,8 @@ pub use profile::{
 };
 pub use schema::{
   BodyPathRule, CapabilityKind, CapabilityMeta, CapabilityTicket, CostModel, ExpressionFunction,
-  RegexArgMeta, RegexFlavor, RuntimeSchema, SignatureMatch, TypeClass, VariableMeta,
+  ExpressionFunctionDiagnostic, ExpressionFunctionScope, RegexArgMeta, RegexFlavor, RuntimeSchema,
+  SignatureMatch, TypeClass, VariableMeta,
 };
 pub use verified::{
   CompiledExpression, CompiledRegexCache, RegexLiteral, VerifiedExprKindRef, VerifiedExpression,

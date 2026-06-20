@@ -75,5 +75,76 @@
         }
       ]
     }
+  },
+  {
+    "id": "waf_request_rejects_response_through_function",
+    "profile": "waf_request",
+    "input": "uses_response()",
+    "schema": {
+      "preset": "waf",
+      "expression_functions": [
+        {
+          "name": "uses_response",
+          "params": [],
+          "expression": "Response.Status == 200"
+        }
+      ]
+    },
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "Response is unavailable in request phase",
+          "span": {
+            "start": 0,
+            "end": 8
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "mitigation_field_rejects_body_object_boundary",
+    "profile": "mitigation_request",
+    "input": "Request.Body",
+    "schema": {
+      "preset": "waf"
+    },
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "MitigationField cannot read request, response, or stream body bytes",
+          "span": {
+            "start": 0,
+            "end": 12
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "mitigation_field_rejects_body_through_function",
+    "profile": "mitigation_request",
+    "input": "identity(Request.Body)",
+    "schema": {
+      "preset": "waf",
+      "expression_functions": [
+        {
+          "name": "identity",
+          "params": ["body"],
+          "expression": "body"
+        }
+      ]
+    },
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "MitigationField cannot read request, response, or stream body bytes",
+          "span": {
+            "start": 0,
+            "end": 22
+          }
+        }
+      ]
+    }
   }
 ]
