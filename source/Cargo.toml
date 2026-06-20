@@ -6,6 +6,7 @@ rust-version = "1.96"
 license = "Apache-2.0"
 description = "A bounded parser and runtime for in-memory DSL expressions."
 repository = "https://github.com/OxiBelt/online-dsl-forge"
+readme = "README.md"
 publish = false
 
 [dependencies]
