@@ -1,0 +1,82 @@
+name: Check online-dsl-forge
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  source-structure:
+    name: Source structure checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Rust module size
+        run: tests/scripts/check-rust-module-size.sh
+
+  test:
+    name: Test with rust-1.96.0
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustup component add rustfmt clippy --toolchain 1.96.0
+
+      - name: Cargo fmt
+        run: cargo fmt --check
+
+      - name: Tests rustfmt
+        run: tests/scripts/check-tests-rustfmt.sh
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --all-features --locked
+
+  rust-advisory-checks:
+    name: Rust advisory checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - name: Install Rust advisory tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Cargo audit
+        run: cargo audit
+
+      - name: Cargo deny advisories
+        run: cargo deny check advisories
