@@ -1,0 +1,122 @@
+[
+  {
+    "id": "reports_all_direct_unknown_variables",
+    "input": "left + right",
+    "schema": {},
+    "options": {},
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "unknown variable left",
+          "span": {
+            "start": 0,
+            "end": 4
+          }
+        },
+        {
+          "message": "unknown variable right",
+          "span": {
+            "start": 7,
+            "end": 12
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "allows_unknown_variables_when_configured",
+    "input": "left + right",
+    "schema": {},
+    "options": {
+      "allow_unknown_variables": true
+    },
+    "expected": {
+      "diagnostics": []
+    }
+  },
+  {
+    "id": "function_arity_mismatch",
+    "input": "len(items, extra)",
+    "schema": {
+      "variables": ["items", "extra"],
+      "functions": {
+        "len": [1]
+      }
+    },
+    "options": {},
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "function len does not accept 2 arguments",
+          "span": {
+            "start": 0,
+            "end": 17
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "unknown_function",
+    "input": "unknown_func(score)",
+    "schema": {
+      "variables": ["score"]
+    },
+    "options": {},
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "unknown function unknown_func",
+          "span": {
+            "start": 0,
+            "end": 19
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "method_arity_mismatch",
+    "input": "name.starts_with()",
+    "schema": {
+      "variables": ["name"],
+      "methods": {
+        "starts_with": [1]
+      }
+    },
+    "options": {},
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "method starts_with does not accept 0 arguments",
+          "span": {
+            "start": 0,
+            "end": 18
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "unknown_method",
+    "input": "name.has_prefix('p')",
+    "schema": {
+      "variables": ["name"],
+      "methods": {
+        "starts_with": [1]
+      }
+    },
+    "options": {},
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "unknown method has_prefix",
+          "span": {
+            "start": 0,
+            "end": 20
+          }
+        }
+      ]
+    }
+  }
+]

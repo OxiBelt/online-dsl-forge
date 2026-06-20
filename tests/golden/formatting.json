@@ -1,0 +1,32 @@
+[
+  {
+    "id": "normalizes_spacing_and_strings",
+    "input": " user . name . starts_with( 'pi' ) && (score+1)>=10 ",
+    "expected": "user.name.starts_with(\"pi\") && score + 1 >= 10"
+  },
+  {
+    "id": "preserves_right_nested_binary_shape",
+    "input": "1-(2-3)",
+    "expected": "1 - (2 - 3)"
+  },
+  {
+    "id": "parenthesizes_unary_boolean_group",
+    "input": "!(enabled || score < 10)",
+    "expected": "!(enabled || score < 10)"
+  },
+  {
+    "id": "normalizes_string_escapes_and_empty_arrays",
+    "input": "['a\\nb', \"quote\\\"\", []]",
+    "expected": "[\"a\\nb\", \"quote\\\"\", []]"
+  },
+  {
+    "id": "preserves_required_grouping_under_multiplication",
+    "input": "(1 + 2) * (3 + 4)",
+    "expected": "(1 + 2) * (3 + 4)"
+  },
+  {
+    "id": "keeps_precedence_without_extra_parentheses",
+    "input": "1 + 2 * 3 == 7 || false",
+    "expected": "1 + 2 * 3 == 7 || false"
+  }
+]

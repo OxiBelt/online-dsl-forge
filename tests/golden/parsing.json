@@ -1,0 +1,335 @@
+[
+  {
+    "id": "precedence_and_method_call",
+    "input": "score + 1 >= 10 && name.starts_with('pi')",
+    "expected_ast": {
+      "kind": {
+        "kind": "binary",
+        "left": {
+          "kind": {
+            "kind": "binary",
+            "left": {
+              "kind": {
+                "kind": "binary",
+                "left": {
+                  "kind": {
+                    "kind": "identifier",
+                    "name": "score"
+                  },
+                  "span": {
+                    "start": 0,
+                    "end": 5
+                  }
+                },
+                "op": "add",
+                "right": {
+                  "kind": {
+                    "kind": "int",
+                    "value": 1
+                  },
+                  "span": {
+                    "start": 8,
+                    "end": 9
+                  }
+                }
+              },
+              "span": {
+                "start": 0,
+                "end": 9
+              }
+            },
+            "op": "ge",
+            "right": {
+              "kind": {
+                "kind": "int",
+                "value": 10
+              },
+              "span": {
+                "start": 13,
+                "end": 15
+              }
+            }
+          },
+          "span": {
+            "start": 0,
+            "end": 15
+          }
+        },
+        "op": "and",
+        "right": {
+          "kind": {
+            "kind": "method_call",
+            "receiver": {
+              "kind": {
+                "kind": "identifier",
+                "name": "name"
+              },
+              "span": {
+                "start": 19,
+                "end": 23
+              }
+            },
+            "name": "starts_with",
+            "args": [
+              {
+                "kind": {
+                  "kind": "string",
+                  "value": "pi"
+                },
+                "span": {
+                  "start": 36,
+                  "end": 40
+                }
+              }
+            ]
+          },
+          "span": {
+            "start": 19,
+            "end": 41
+          }
+        }
+      },
+      "span": {
+        "start": 0,
+        "end": 41
+      }
+    }
+  },
+  {
+    "id": "members_functions_and_arrays",
+    "input": "user.name.starts_with('pi') && len([1, 2]) == 2",
+    "expected_ast": {
+      "kind": {
+        "kind": "binary",
+        "left": {
+          "kind": {
+            "kind": "method_call",
+            "receiver": {
+              "kind": {
+                "kind": "member",
+                "receiver": {
+                  "kind": {
+                    "kind": "identifier",
+                    "name": "user"
+                  },
+                  "span": {
+                    "start": 0,
+                    "end": 4
+                  }
+                },
+                "name": "name"
+              },
+              "span": {
+                "start": 0,
+                "end": 9
+              }
+            },
+            "name": "starts_with",
+            "args": [
+              {
+                "kind": {
+                  "kind": "string",
+                  "value": "pi"
+                },
+                "span": {
+                  "start": 22,
+                  "end": 26
+                }
+              }
+            ]
+          },
+          "span": {
+            "start": 0,
+            "end": 27
+          }
+        },
+        "op": "and",
+        "right": {
+          "kind": {
+            "kind": "binary",
+            "left": {
+              "kind": {
+                "kind": "function_call",
+                "name": "len",
+                "args": [
+                  {
+                    "kind": {
+                      "kind": "array",
+                      "items": [
+                        {
+                          "kind": {
+                            "kind": "int",
+                            "value": 1
+                          },
+                          "span": {
+                            "start": 36,
+                            "end": 37
+                          }
+                        },
+                        {
+                          "kind": {
+                            "kind": "int",
+                            "value": 2
+                          },
+                          "span": {
+                            "start": 39,
+                            "end": 40
+                          }
+                        }
+                      ]
+                    },
+                    "span": {
+                      "start": 35,
+                      "end": 41
+                    }
+                  }
+                ]
+              },
+              "span": {
+                "start": 31,
+                "end": 42
+              }
+            },
+            "op": "eq",
+            "right": {
+              "kind": {
+                "kind": "int",
+                "value": 2
+              },
+              "span": {
+                "start": 46,
+                "end": 47
+              }
+            }
+          },
+          "span": {
+            "start": 31,
+            "end": 47
+          }
+        }
+      },
+      "span": {
+        "start": 0,
+        "end": 47
+      }
+    }
+  },
+  {
+    "id": "right_nested_binary_shape",
+    "input": "1 - (2 - 3)",
+    "expected_ast": {
+      "kind": {
+        "kind": "binary",
+        "left": {
+          "kind": {
+            "kind": "int",
+            "value": 1
+          },
+          "span": {
+            "start": 0,
+            "end": 1
+          }
+        },
+        "op": "sub",
+        "right": {
+          "kind": {
+            "kind": "binary",
+            "left": {
+              "kind": {
+                "kind": "int",
+                "value": 2
+              },
+              "span": {
+                "start": 5,
+                "end": 6
+              }
+            },
+            "op": "sub",
+            "right": {
+              "kind": {
+                "kind": "int",
+                "value": 3
+              },
+              "span": {
+                "start": 9,
+                "end": 10
+              }
+            }
+          },
+          "span": {
+            "start": 5,
+            "end": 10
+          }
+        }
+      },
+      "span": {
+        "start": 0,
+        "end": 10
+      }
+    }
+  },
+  {
+    "id": "literal_array",
+    "input": "[null, true, -3.5, 'a\\nb']",
+    "expected_ast": {
+      "kind": {
+        "kind": "array",
+        "items": [
+          {
+            "kind": {
+              "kind": "null"
+            },
+            "span": {
+              "start": 1,
+              "end": 5
+            }
+          },
+          {
+            "kind": {
+              "kind": "bool",
+              "value": true
+            },
+            "span": {
+              "start": 7,
+              "end": 11
+            }
+          },
+          {
+            "kind": {
+              "kind": "unary",
+              "op": "neg",
+              "expr": {
+                "kind": {
+                  "kind": "float",
+                  "value": 3.5
+                },
+                "span": {
+                  "start": 14,
+                  "end": 17
+                }
+              }
+            },
+            "span": {
+              "start": 13,
+              "end": 17
+            }
+          },
+          {
+            "kind": {
+              "kind": "string",
+              "value": "a\nb"
+            },
+            "span": {
+              "start": 19,
+              "end": 25
+            }
+          }
+        ]
+      },
+      "span": {
+        "start": 0,
+        "end": 26
+      }
+    }
+  }
+]

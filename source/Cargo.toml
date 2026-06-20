@@ -24,3 +24,7 @@ path = "../tests/rust/public_api.rs"
 [[test]]
 name = "cli"
 path = "../tests/rust/cli.rs"
+
+[[test]]
+name = "golden"
+path = "../tests/rust/golden.rs"

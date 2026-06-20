@@ -1,0 +1,87 @@
+[
+  {
+    "id": "binding_target_strips_authoring_tables",
+    "origin": "/references/OxiBelt/source/src/waf/rulepacks_tests.rs:242",
+    "source": "OxiBelt render_for_install_uses_binding_target_and_strips_bindings",
+    "input": "[rulepack]\nschema_version = 2\nname = \"vaultwarden-hardening\"\nversion = \"0.1.0\"\ntargets = [\"vaultwarden\"]\n\n[[variables]]\nname = \"admin_cidr\"\ntype = \"cidr\"\nrequired = true\n\n[[bindings]]\nname = \"app_route\"\nkind = \"route\"\nbind_as = \"route_name\"\nrequired = true\n\n[bindings.discovery]\nname_any = [\"vault\"]\n\n[[rules]]\nname = \"block-demo\"\nphase = \"request\"\npriority = 100\ncontent = \"when = \\\"Context.RouteName == '{{route_name}}' && !Request.Client.Ip.inCidr('{{admin_cidr}}')\\\"\\n\"\n",
+    "options": {
+      "variables": {
+        "route_name": "mmsecretvault",
+        "admin_cidr": "10.0.0.0/8"
+      }
+    },
+    "expected": {
+      "must_contain": ["mmsecretvault", "10.0.0.0/8", "default = \"10.0.0.0/8\"", "required = false"],
+      "must_not_contain": ["{{route_name}}", "{{admin_cidr}}", "[[bindings]]", "[[profiles]]", "[[overrides]]"]
+    }
+  },
+  {
+    "id": "force_mode_sets_default_and_rule_modes",
+    "origin": "/references/OxiBelt/source/src/waf/rulepacks_tests.rs:138",
+    "source": "OxiBelt force_mode_sets_rule_modes",
+    "input": "[rulepack]\nschema_version = 2\nname = \"demo\"\nversion = \"0.1.0\"\n\n[[rules]]\nname = \"block-demo\"\nphase = \"request\"\npriority = 100\ncontent = '''\nwhen = \"true\"\n\n[[actions]]\ntype = \"reject\"\nstatus = 403\n'''\n",
+    "options": {
+      "mode_override": {
+        "mode": "enforcing",
+        "force": true
+      }
+    },
+    "expected": {
+      "must_contain": ["default_mode = \"enforcing\"", "mode = \"enforcing\""],
+      "must_not_contain": ["[[overrides]]"]
+    }
+  },
+  {
+    "id": "local_override_specificity_wins_last",
+    "origin": "/references/OxiBelt/source/src/waf/rulepacks_override_tests.rs:4",
+    "source": "OxiBelt rulepack_overrides_apply_with_local_specificity_last",
+    "input": "[rulepack]\nschema_version = 2\nname = \"vaultwarden-hardening\"\nversion = \"0.1.0\"\n\n[[overrides]]\nselector = { rulepack = \"vaultwarden-hardening\" }\nmode = \"monitor\"\npriority = 10\n\n[[overrides]]\nselector = { tags = [\"surface:login\"] }\nmode = \"enforcing\"\npriority = 20\n\n[[rules]]\nname = \"login\"\nid = \"oxibelt.vaultwarden.login_rate_limit\"\ntags = [\"surface:login\"]\nphase = \"request\"\npriority = 100\ncontent = '''\nwhen = \"true\"\n\n[[actions]]\ntype = \"rate_limit\"\nname = \"login\"\nkey = \"client_ip_path\"\nrate = \"5r/m\"\nburst = 5\nstatus = 429\nbody = \"Too Many Requests\"\n'''\n",
+    "options": {
+      "local_overrides": [
+        {
+          "selector": {
+            "rule_id": "oxibelt.vaultwarden.login_rate_limit"
+          },
+          "action": {
+            "action_type": "rate_limit",
+            "name": "login"
+          },
+          "mode": "monitor",
+          "priority": 90,
+          "rate": "10r/m",
+          "burst": 9,
+          "status": 403,
+          "body": "Local limit"
+        }
+      ]
+    },
+    "expected": {
+      "must_contain": ["priority = 90", "mode = \"monitor\"", "rate = \"10r/m\"", "burst = 9", "status = 403", "body = \"Local limit\""],
+      "must_not_contain": ["[[overrides]]"]
+    }
+  },
+  {
+    "id": "local_exception_renders_into_install_manifest",
+    "origin": "/references/OxiBelt/source/src/waf/rulepacks_exception_tests.rs:216",
+    "source": "OxiBelt local_rulepack_exceptions_render_into_install_manifest",
+    "input": "[rulepack]\nschema_version = 2\nname = \"demo\"\nversion = \"0.1.0\"\n\n[[rules]]\nname = \"login\"\nid = \"oxibelt.demo.login\"\nphase = \"request\"\npriority = 100\ncontent = \"when = \\\"true\\\"\\n\"\n",
+    "options": {
+      "local_exceptions": [
+        {
+          "name": "allow-healthcheck-login-preflight",
+          "rule_ids": ["oxibelt.demo.login"],
+          "routes": ["app-root"],
+          "methods": ["GET"],
+          "path_prefixes": ["/identity/accounts/prelogin"],
+          "source_cidrs": ["10.20.0.0/16"],
+          "reason": "internal synthetic healthcheck",
+          "expires_at": "2999-07-01T00:00:00Z"
+        }
+      ]
+    },
+    "expected": {
+      "must_contain": ["[[exceptions]]", "allow-healthcheck-login-preflight", "routes = [\"app-root\"]"],
+      "must_not_contain": ["{{"]
+    }
+  }
+]

@@ -1,0 +1,68 @@
+[
+  {
+    "id": "no_body_access",
+    "origin": "/references/OxiBelt/source/src/waf/plan.rs:191",
+    "expression": "Request.Http.Path == \"/admin\"",
+    "functions": [],
+    "expected": {
+      "request_body": "none",
+      "response_body": "none"
+    }
+  },
+  {
+    "id": "request_body_size_only",
+    "origin": "/references/OxiBelt/source/src/waf/plan.rs:195",
+    "expression": "Request.Body.Size > 0",
+    "functions": [],
+    "expected": {
+      "request_body": "size_only",
+      "response_body": "none"
+    }
+  },
+  {
+    "id": "request_body_text_requires_prefix",
+    "origin": "/references/OxiBelt/source/src/waf/plan.rs:198",
+    "expression": "Request.Body.Text.contains(\"secret\")",
+    "functions": [],
+    "expected": {
+      "request_body": "prefix_bytes",
+      "response_body": "none"
+    }
+  },
+  {
+    "id": "response_body_bytes_requires_prefix",
+    "origin": "/references/OxiBelt/source/src/waf/plan.rs:239",
+    "expression": "Response.Body.Bytes.containsBytes(\"token\")",
+    "functions": [],
+    "expected": {
+      "request_body": "none",
+      "response_body": "prefix_bytes"
+    }
+  },
+  {
+    "id": "function_body_binding_propagates_request_need",
+    "origin": "/references/OxiBelt/source/src/waf/plan.rs:299",
+    "expression": "has_secret(Request.Body)",
+    "functions": [
+      {
+        "name": "has_secret",
+        "params": ["body"],
+        "expression": "body.Text.contains(\"secret\")"
+      }
+    ],
+    "expected": {
+      "request_body": "prefix_bytes",
+      "response_body": "none"
+    }
+  },
+  {
+    "id": "binary_merge_keeps_maximum_need",
+    "origin": "/references/OxiBelt/source/src/waf/plan.rs:224",
+    "expression": "Request.Body.Size > 0 && Response.Body.Text.contains(\"error\")",
+    "functions": [],
+    "expected": {
+      "request_body": "size_only",
+      "response_body": "prefix_bytes"
+    }
+  }
+]

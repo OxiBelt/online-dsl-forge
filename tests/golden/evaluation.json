@@ -1,0 +1,127 @@
+[
+  {
+    "id": "default_runtime_expression",
+    "input": "score + 1 >= 10 && name.starts_with('pi')",
+    "bindings": {
+      "score": 9,
+      "name": "piquark"
+    },
+    "compile_options": {},
+    "limits": {},
+    "expected": {
+      "ok": true
+    }
+  },
+  {
+    "id": "object_array_and_object_methods",
+    "input": "user.roles.contains('admin') && user.meta.contains_key('active')",
+    "bindings": {
+      "user": {
+        "roles": ["reader", "admin"],
+        "meta": {
+          "active": true
+        }
+      }
+    },
+    "compile_options": {},
+    "limits": {},
+    "expected": {
+      "ok": true
+    }
+  },
+  {
+    "id": "string_concat_and_ascii_case_method",
+    "input": "(greeting + ' ' + name).upper_ascii()",
+    "bindings": {
+      "greeting": "hello",
+      "name": "pi"
+    },
+    "compile_options": {},
+    "limits": {},
+    "expected": {
+      "ok": "HELLO PI"
+    }
+  },
+  {
+    "id": "boolean_and_short_circuits_missing_variable",
+    "input": "false && missing",
+    "bindings": {},
+    "compile_options": {
+      "allow_unknown_variables": true
+    },
+    "limits": {},
+    "expected": {
+      "ok": false
+    }
+  },
+  {
+    "id": "division_by_zero_fails_closed",
+    "input": "10 / zero",
+    "bindings": {
+      "zero": 0
+    },
+    "compile_options": {},
+    "limits": {},
+    "expected": {
+      "error": "division by zero at 0..9"
+    }
+  },
+  {
+    "id": "missing_object_member_fails_closed",
+    "input": "user.missing",
+    "bindings": {
+      "user": {}
+    },
+    "compile_options": {},
+    "limits": {},
+    "expected": {
+      "error": "missing object member missing at 0..12"
+    }
+  },
+  {
+    "id": "integer_addition_overflow_fails_closed",
+    "input": "9223372036854775807 + 1",
+    "bindings": {},
+    "compile_options": {},
+    "limits": {},
+    "expected": {
+      "error": "integer addition overflowed at 0..23"
+    }
+  },
+  {
+    "id": "string_limit_fails_closed",
+    "input": "'ab' + 'cd'",
+    "bindings": {},
+    "compile_options": {},
+    "limits": {
+      "max_string_bytes": 3
+    },
+    "expected": {
+      "error": "string byte limit exceeded at 0..11"
+    }
+  },
+  {
+    "id": "array_item_limit_fails_closed",
+    "input": "[1, 2, 3]",
+    "bindings": {},
+    "compile_options": {},
+    "limits": {
+      "max_array_items": 2
+    },
+    "expected": {
+      "error": "array item limit exceeded at 0..9"
+    }
+  },
+  {
+    "id": "step_limit_fails_closed",
+    "input": "1 + 2",
+    "bindings": {},
+    "compile_options": {},
+    "limits": {
+      "max_steps": 1
+    },
+    "expected": {
+      "error": "evaluation step limit exceeded at 0..1"
+    }
+  }
+]
