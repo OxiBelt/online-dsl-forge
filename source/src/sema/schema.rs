@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::sema::profile::{BodyAccess, BodyTarget, Phase};
 
+mod oxirule;
+
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TypeClass {

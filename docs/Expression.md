@@ -79,3 +79,22 @@ The CLI evaluation command registers a small default runtime:
 - object methods: `len()`, `contains_key(value)`
 
 Host applications may provide different registries through the Rust API.
+
+## OxiRule Compatibility
+
+Hosts that embed OxiBelt-style OxiRule expressions should parse with the normal
+parser, then analyze with `ExpressionDialect::OxiRuleV1`,
+`RuntimeSchema::oxirule_waf()`, an `oxirule_waf_*` security profile, and
+`ExpressionFunctionMode::CallFrame`.
+
+The compatibility dialect rejects generic syntax outside OxiRule V1:
+
+- array literals
+- float literals
+- unary numeric negation
+- `-`, `*`, `/`, and `%`
+
+The OxiRule WAF schema exposes lowerCamelCase method names such as
+`startsWith`, `lowerAscii`, `anyValueMatches`, and `directPeerIpNetworkPrefix`,
+plus WAF roots such as `Context`, `Request`, `DynamicPolicy`, `Response`, and
+`Stream`.

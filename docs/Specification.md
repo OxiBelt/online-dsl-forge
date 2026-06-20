@@ -73,6 +73,7 @@ Semantic analysis validates parsed AST against a host-provided runtime schema
 and security profile. Validation covers:
 
 - unknown variables unless explicitly allowed by `CompileOptions`
+- optional dialect restrictions, including the OxiRule V1 compatibility dialect
 - unknown functions
 - function arity
 - expression-function graph validation, including invalid parameters,
@@ -87,6 +88,13 @@ and security profile. Validation covers:
   or `Stream.Payload` access, including through expression functions
 - regex admission policy and literal regex precompilation for strict profiles
 - static AST node, call-depth, and cost limits
+
+`ExpressionDialect::OxiRuleV1` is an embedding compatibility gate for
+OxiBelt-style OxiRule expressions. It accepts the shared parser output but
+rejects generic syntax that OxiRule does not currently expose: array literals,
+float literals, unary numeric negation, and the `-`, `*`, `/`, and `%`
+operators. This keeps OxiBelt migration checks behavior-preserving without
+forking the parser.
 
 ### Capability Metadata
 
@@ -112,6 +120,22 @@ behavior in OxiBelt-like hosts. Global function bodies resolve nested calls
 against global functions only; local function bodies resolve nested calls
 against local functions first and then global functions.
 
+Expression functions can be lowered in two modes. The default inline mode keeps
+the historical generic behavior by substituting arguments into the function
+body during analysis. `ExpressionFunctionMode::CallFrame` preserves a verified
+expression-function call node, evaluates arguments exactly once at runtime, and
+evaluates the verified body with parameter locals. This mode is intended for
+OxiRule compatibility, where function arguments are evaluated once and body
+origin inference still has to propagate through parameters such as
+`has_secret(Request.Body)`.
+
+`RuntimeSchema::oxirule_waf()` and the `SecurityProfile::oxirule_waf_*`
+constructors provide the behavior-preserving OxiRule WAF migration surface. The
+compatibility profiles use the WAF phase/body/cost limits but keep
+`RegexPolicy::DynamicWithBudget` so existing OxiBelt rules with dynamic regex
+arguments continue to validate. The stricter `waf_*` profiles remain
+literal-regex-only.
+
 The compatibility `compile_expression` API uses the generic safe profile and
 returns a `CompiledExpression` backed by sema's verified program.
 
@@ -128,9 +152,10 @@ to the verified program; host runtime bindings do not own or mutate it.
 
 Function and method calls plus unary and binary operators carry capability
 tickets in the verified tree. Expression functions are expanded during semantic
-analysis and do not become runtime capabilities. A runtime context must provide
-registry metadata compatible with every verified capability ticket before
-evaluation begins.
+analysis in inline mode and become verified expression-function call-frame
+nodes in call-frame mode; neither form becomes a runtime host capability. A
+runtime context must provide registry metadata compatible with every verified
+capability ticket before evaluation begins.
 
 ## Runtime Evaluation
 

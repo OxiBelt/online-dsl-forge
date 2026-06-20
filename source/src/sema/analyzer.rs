@@ -10,6 +10,7 @@ use crate::parser::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::sema::dialect::ExpressionDialect;
 use crate::sema::profile::{
   BodyNeedSummary, Determinism, RegexPolicy, SecurityProfile, SecurityProfileId,
 };
@@ -20,7 +21,9 @@ use crate::sema::verified::{
   CompiledExpression, CompiledRegexCache, RegexLiteral, VerifiedExprKind, VerifiedExpression,
   VerifiedProgram, VerifiedProgramParts,
 };
-use support::{ArgsAnalysis, ExprAnalysis, ObjectOrigin, member_origin, string_literal};
+use support::{
+  ArgsAnalysis, ExprAnalysis, LocalBinding, ObjectOrigin, member_origin, string_literal,
+};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CompileOptions {
@@ -29,11 +32,20 @@ pub struct CompileOptions {
   pub allow_unknown_methods: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ExpressionFunctionMode {
+  #[default]
+  Inline,
+  CallFrame,
+}
+
 #[derive(Debug, Clone)]
 pub struct Analyzer {
   profile: SecurityProfile,
   options: CompileOptions,
+  dialect: ExpressionDialect,
   expression_function_scope: ExpressionFunctionScope,
+  expression_function_mode: ExpressionFunctionMode,
 }
 
 impl Analyzer {
@@ -41,7 +53,9 @@ impl Analyzer {
     Self {
       profile,
       options: CompileOptions::default(),
+      dialect: ExpressionDialect::default(),
       expression_function_scope: ExpressionFunctionScope::Local,
+      expression_function_mode: ExpressionFunctionMode::default(),
     }
   }
 
@@ -50,8 +64,18 @@ impl Analyzer {
     self
   }
 
+  pub fn with_dialect(mut self, dialect: ExpressionDialect) -> Self {
+    self.dialect = dialect;
+    self
+  }
+
   pub fn with_expression_function_scope(mut self, scope: ExpressionFunctionScope) -> Self {
     self.expression_function_scope = scope;
+    self
+  }
+
+  pub fn with_expression_function_mode(mut self, mode: ExpressionFunctionMode) -> Self {
+    self.expression_function_mode = mode;
     self
   }
 
@@ -61,6 +85,7 @@ impl Analyzer {
     schema: &RuntimeSchema,
   ) -> Result<VerifiedProgram, DiagnosticReport> {
     let mut state = AnalyzeState::new(self, schema);
+    self.dialect.validate(expression, &mut state.diagnostics);
     state.validate_function_graph();
     let analysis = state.analyze_expression(expression, 0);
     state.validate_program_bounds(&analysis, expression.span);
@@ -103,6 +128,7 @@ struct AnalyzeState<'a> {
   required_capabilities: BTreeSet<CapabilityTicket>,
   required_capability_metadata: BTreeMap<CapabilityTicket, CapabilityMeta>,
   active_functions: Vec<(ExpressionFunctionScope, String)>,
+  local_bindings: Vec<BTreeMap<String, LocalBinding>>,
 }
 
 impl<'a> AnalyzeState<'a> {
@@ -116,6 +142,7 @@ impl<'a> AnalyzeState<'a> {
       required_capabilities: BTreeSet::new(),
       required_capability_metadata: BTreeMap::new(),
       active_functions: Vec::new(),
+      local_bindings: Vec::new(),
     }
   }
 
@@ -190,6 +217,14 @@ impl<'a> AnalyzeState<'a> {
   }
 
   fn analyze_identifier(&mut self, name: &str, span: SourceSpan) -> ExprAnalysis {
+    if let Some(binding) = self.local_binding(name).cloned() {
+      return ExprAnalysis::leaf(
+        VerifiedExpression::new(VerifiedExprKind::Identifier(name.to_string()), span),
+        binding.origin,
+      )
+      .with_path_option(binding.path)
+      .with_mitigation_payload(binding.mitigation_payload);
+    }
     if !self.analyzer.options.allow_unknown_variables && !self.schema.has_variable(name) {
       self
         .diagnostics
@@ -459,20 +494,31 @@ impl<'a> AnalyzeState<'a> {
       .iter()
       .map(|arg| {
         let analysis = self.analyze_expression(arg, depth + 1);
+        let binding = LocalBinding::from_analysis(&analysis);
         body_need = body_need.merge(analysis.body_need);
         mitigation_payload |= analysis.mitigation_payload;
         nodes += analysis.nodes;
         cost += analysis.cost;
-        analysis.expr
+        (analysis.expr, binding)
       })
-      .collect();
+      .collect::<Vec<_>>();
+    let (exprs, bindings) = exprs.into_iter().unzip();
     ArgsAnalysis {
       exprs,
+      bindings,
       body_need,
       mitigation_payload,
       nodes,
       cost,
     }
+  }
+
+  fn local_binding(&self, name: &str) -> Option<&LocalBinding> {
+    self
+      .local_bindings
+      .iter()
+      .rev()
+      .find_map(|bindings| bindings.get(name))
   }
 
   fn validate_call(

@@ -428,6 +428,7 @@ pub fn evaluate_verified(
     limits,
     steps: 0,
     program,
+    locals: Vec::new(),
   };
   state.eval(program.root(), context, 0)
 }
@@ -436,6 +437,15 @@ struct EvalState<'a> {
   limits: EvalLimits,
   steps: usize,
   program: &'a VerifiedProgram,
+  locals: Vec<BTreeMap<String, Value>>,
+}
+
+struct ExpressionFunctionFrame<'a> {
+  name: &'a str,
+  params: &'a [String],
+  args: &'a [VerifiedExpression],
+  body: &'a VerifiedExpression,
+  span: SourceSpan,
 }
 
 impl EvalState<'_> {
@@ -458,8 +468,9 @@ impl EvalState<'_> {
       VerifiedExprKindRef::Float(value) => Ok(Value::Float(value)),
       VerifiedExprKindRef::String(value) => self.checked_string(value.to_string(), span),
       VerifiedExprKindRef::Array(items) => self.eval_array(items, context, depth, span),
-      VerifiedExprKindRef::Identifier(name) => context
-        .get_variable(name)
+      VerifiedExprKindRef::Identifier(name) => self
+        .local_value(name)
+        .or_else(|| context.get_variable(name))
         .ok_or_else(|| EvalError::new(format!("unknown variable {name}"), span)),
       VerifiedExprKindRef::Member { receiver, name } => {
         let value = self.eval(receiver, context, depth + 1)?;
@@ -471,6 +482,22 @@ impl EvalState<'_> {
           .registry()
           .call_function(self.call_context(span), name, &args, span)
       }
+      VerifiedExprKindRef::ExpressionFunctionCall {
+        name,
+        params,
+        args,
+        body,
+      } => self.eval_expression_function(
+        ExpressionFunctionFrame {
+          name,
+          params,
+          args,
+          body,
+          span,
+        },
+        context,
+        depth,
+      ),
       VerifiedExprKindRef::MethodCall {
         receiver,
         name,
@@ -531,6 +558,45 @@ impl EvalState<'_> {
       .iter()
       .map(|arg| self.eval(arg, context, depth + 1))
       .collect()
+  }
+
+  fn eval_expression_function(
+    &mut self,
+    frame: ExpressionFunctionFrame<'_>,
+    context: &dyn RuntimeContext,
+    depth: usize,
+  ) -> Result<Value, EvalError> {
+    if frame.params.len() != frame.args.len() {
+      return Err(EvalError::new(
+        format!(
+          "verified expression function {} expected {} arguments but got {}",
+          frame.name,
+          frame.params.len(),
+          frame.args.len()
+        ),
+        frame.span,
+      ));
+    }
+
+    let values = self.eval_args(frame.args, context, depth)?;
+    let locals = frame
+      .params
+      .iter()
+      .cloned()
+      .zip(values)
+      .collect::<BTreeMap<_, _>>();
+    self.locals.push(locals);
+    let result = self.eval(frame.body, context, depth + 1);
+    self.locals.pop();
+    result
+  }
+
+  fn local_value(&self, name: &str) -> Option<Value> {
+    self
+      .locals
+      .iter()
+      .rev()
+      .find_map(|locals| locals.get(name).cloned())
   }
 
   fn eval_member(&self, value: Value, name: &str, span: SourceSpan) -> Result<Value, EvalError> {

@@ -1,8 +1,8 @@
 use online_dsl_forge::parse_expression;
 use online_dsl_forge::sema::{
   Analyzer, BodyAccess, CapabilityKind, CapabilityMeta, CapabilityTicket, CostModel,
-  ExpressionFunctionScope, Phase, RegexFlavor, RegexPolicy, RuntimeSchema, SecurityProfile,
-  VerifiedExprKindRef,
+  ExpressionDialect, ExpressionFunctionMode, ExpressionFunctionScope, Phase, RegexFlavor,
+  RegexPolicy, RuntimeSchema, SecurityProfile, VerifiedExprKindRef,
 };
 
 #[test]
@@ -519,4 +519,103 @@ fn expression_function_graph_rejects_unknown_calls() {
     .expect_err("unknown function calls in expression functions should be rejected");
 
   assert!(error.to_string().contains("unknown function missing"));
+}
+
+#[test]
+fn oxirule_dialect_rejects_syntax_outside_oxirule_v1() {
+  let ast = parse_expression("[1.5, -score, score * 2]").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("score");
+
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .with_dialect(ExpressionDialect::OxiRuleV1)
+    .analyze(&ast, &schema)
+    .expect_err("OxiRule dialect should reject broader generic syntax");
+  let message = error.to_string();
+
+  assert!(message.contains("OxiRule V1 does not support array literals"));
+  assert!(message.contains("OxiRule V1 does not support float literals"));
+  assert!(message.contains("OxiRule V1 does not support unary numeric negation"));
+  assert!(message.contains("OxiRule V1 does not support operator *"));
+}
+
+#[test]
+fn oxirule_dialect_rejects_broad_syntax_in_expression_functions() {
+  let ast = parse_expression("helper(score)").expect("expression should parse");
+  let function = parse_expression("[score]").expect("function should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("score")
+    .add_expression_function("helper", ["score"], function);
+
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .with_dialect(ExpressionDialect::OxiRuleV1)
+    .analyze(&ast, &schema)
+    .expect_err("OxiRule dialect should validate function bodies");
+
+  assert!(
+    error
+      .to_string()
+      .contains("OxiRule V1 does not support array literals")
+  );
+}
+
+#[test]
+fn oxirule_compat_profile_allows_dynamic_regex_arguments() {
+  let ast =
+    parse_expression("Request.Http.Path.matches(pattern)").expect("expression should parse");
+  let mut schema = RuntimeSchema::oxirule_waf();
+  schema.add_variable("pattern");
+
+  let verified = Analyzer::new(SecurityProfile::oxirule_waf_request())
+    .with_dialect(ExpressionDialect::OxiRuleV1)
+    .analyze(&ast, &schema)
+    .expect("compat profile should preserve current dynamic regex behavior");
+
+  assert!(verified.regex_literals().is_empty());
+  assert!(verified.regex_cache().is_empty());
+}
+
+#[test]
+fn oxirule_schema_tracks_http_body_aliases_and_camel_case_methods() {
+  let ast = parse_expression(
+    "Request.Http.Body.Text.contains(\"secret\") && Request.Http.Path.startsWith(\"/admin\")",
+  )
+  .expect("expression should parse");
+
+  let verified = Analyzer::new(SecurityProfile::oxirule_waf_request())
+    .with_dialect(ExpressionDialect::OxiRuleV1)
+    .analyze(&ast, &RuntimeSchema::oxirule_waf())
+    .expect("OxiRule schema should accept OxiBelt method names");
+
+  assert_eq!(verified.body_need().request, BodyAccess::PrefixBytes);
+  assert!(
+    verified
+      .required_capabilities()
+      .contains(&CapabilityTicket::new(
+        CapabilityKind::Method,
+        "startsWith",
+        1
+      ))
+  );
+}
+
+#[test]
+fn oxirule_call_frame_functions_propagate_bound_body_origin() {
+  let ast = parse_expression("has_secret(Request.Http.Body)").expect("expression should parse");
+  let function = parse_expression("body.Text.contains(\"secret\")").expect("function should parse");
+  let mut schema = RuntimeSchema::oxirule_waf();
+  schema.add_expression_function("has_secret", ["body"], function);
+
+  let verified = Analyzer::new(SecurityProfile::oxirule_waf_request())
+    .with_dialect(ExpressionDialect::OxiRuleV1)
+    .with_expression_function_mode(ExpressionFunctionMode::CallFrame)
+    .analyze(&ast, &schema)
+    .expect("call-frame mode should analyze OxiRule function calls");
+
+  assert_eq!(verified.body_need().request, BodyAccess::PrefixBytes);
+  assert!(matches!(
+    verified.root().kind(),
+    VerifiedExprKindRef::ExpressionFunctionCall { .. }
+  ));
 }

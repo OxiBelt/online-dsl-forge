@@ -45,14 +45,37 @@ impl ExprAnalysis {
     self
   }
 
+  pub fn with_path_option(mut self, path: Option<Vec<String>>) -> Self {
+    self.path = path;
+    self
+  }
+
   pub fn with_mitigation_payload(mut self, value: bool) -> Self {
     self.mitigation_payload = value;
     self
   }
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct LocalBinding {
+  pub origin: Option<ObjectOrigin>,
+  pub path: Option<Vec<String>>,
+  pub mitigation_payload: bool,
+}
+
+impl LocalBinding {
+  pub fn from_analysis(analysis: &ExprAnalysis) -> Self {
+    Self {
+      origin: analysis.origin,
+      path: analysis.path.clone(),
+      mitigation_payload: analysis.mitigation_payload,
+    }
+  }
+}
+
 pub(super) struct ArgsAnalysis {
   pub exprs: Vec<VerifiedExpression>,
+  pub bindings: Vec<LocalBinding>,
   pub body_need: BodyNeedSummary,
   pub mitigation_payload: bool,
   pub nodes: usize,

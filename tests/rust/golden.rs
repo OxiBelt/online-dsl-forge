@@ -568,6 +568,19 @@ fn verified_expr_summary(expression: &VerifiedExpression) -> JsonValue {
       "capability": capability,
       "args": args.iter().map(verified_expr_summary).collect::<Vec<_>>(),
     }),
+    VerifiedExprKindRef::ExpressionFunctionCall {
+      name,
+      params,
+      args,
+      body,
+    } => json!({
+      "kind": "expression_function_call",
+      "name": name,
+      "params": params,
+      "capability": capability,
+      "args": args.iter().map(verified_expr_summary).collect::<Vec<_>>(),
+      "body": verified_expr_summary(body),
+    }),
     VerifiedExprKindRef::MethodCall {
       receiver,
       name,

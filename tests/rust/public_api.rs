@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use online_dsl_forge::{
   Analyzer, BinaryOp, CapabilityMeta, CompileOptions, CostModel, DynamicRegistry, EvalLimits,
-  MapRuntime, RegexFlavor, RuntimeSchema, SecurityProfile, Value, compile_expression, evaluate,
-  evaluate_verified, format_expression, parse_expression,
+  ExpressionFunctionMode, MapRuntime, RegexFlavor, RuntimeSchema, SecurityProfile, Value,
+  compile_expression, evaluate, evaluate_verified, format_expression, parse_expression,
 };
 
 #[test]
@@ -186,6 +187,40 @@ fn evaluate_verified_accepts_analyzer_output() {
     .expect("verified expression should evaluate");
 
   assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn expression_function_call_frame_evaluates_arguments_once() {
+  let ast = parse_expression("same(next())").expect("expression should parse");
+  let same = parse_expression("value == value").expect("function should parse");
+  let counter = Arc::new(Mutex::new(0_i64));
+  let counter_for_handler = Arc::clone(&counter);
+  let mut registry = DynamicRegistry::new();
+  registry.register_function("next", 0, move |_| {
+    let mut value = counter_for_handler
+      .lock()
+      .expect("counter mutex should not be poisoned");
+    *value += 1;
+    Ok(Value::Int(*value))
+  });
+  let runtime = MapRuntime::new(BTreeMap::new(), registry);
+  let mut schema = runtime.schema();
+  schema.add_expression_function("same", ["value"], same);
+
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .with_expression_function_mode(ExpressionFunctionMode::CallFrame)
+    .analyze(&ast, &schema)
+    .expect("call-frame expression function should analyze");
+  let value = evaluate_verified(&verified, &runtime, EvalLimits::default())
+    .expect("call-frame expression function should evaluate");
+
+  assert_eq!(value, Value::Bool(true));
+  assert_eq!(
+    *counter
+      .lock()
+      .expect("counter mutex should not be poisoned"),
+    1
+  );
 }
 
 #[test]

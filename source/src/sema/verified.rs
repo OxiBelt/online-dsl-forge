@@ -152,6 +152,17 @@ impl VerifiedExpression {
       VerifiedExprKind::FunctionCall { name, args } => {
         VerifiedExprKindRef::FunctionCall { name, args }
       }
+      VerifiedExprKind::ExpressionFunctionCall {
+        name,
+        params,
+        args,
+        body,
+      } => VerifiedExprKindRef::ExpressionFunctionCall {
+        name,
+        params,
+        args,
+        body,
+      },
       VerifiedExprKind::MethodCall {
         receiver,
         name,
@@ -188,6 +199,12 @@ pub(crate) enum VerifiedExprKind {
     name: String,
     args: Vec<VerifiedExpression>,
   },
+  ExpressionFunctionCall {
+    name: String,
+    params: Vec<String>,
+    args: Vec<VerifiedExpression>,
+    body: Box<VerifiedExpression>,
+  },
   MethodCall {
     receiver: Box<VerifiedExpression>,
     name: String,
@@ -219,6 +236,12 @@ pub enum VerifiedExprKindRef<'a> {
   FunctionCall {
     name: &'a str,
     args: &'a [VerifiedExpression],
+  },
+  ExpressionFunctionCall {
+    name: &'a str,
+    params: &'a [String],
+    args: &'a [VerifiedExpression],
+    body: &'a VerifiedExpression,
   },
   MethodCall {
     receiver: &'a VerifiedExpression,

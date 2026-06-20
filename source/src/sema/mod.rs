@@ -1,11 +1,13 @@
 //! Semantic analysis, security profiles, and verified IR.
 
 mod analyzer;
+mod dialect;
 mod profile;
 mod schema;
 mod verified;
 
-pub use analyzer::{Analyzer, CompileOptions, compile_expression};
+pub use analyzer::{Analyzer, CompileOptions, ExpressionFunctionMode, compile_expression};
+pub use dialect::ExpressionDialect;
 pub use profile::{
   BodyAccess, BodyNeedSummary, BodyTarget, Determinism, Phase, RegexPolicy, SecurityProfile,
   SecurityProfileId,

@@ -4,8 +4,8 @@ use crate::parser::{AstExpression, Diagnostic, SourceSpan};
 use crate::sema::schema::{ExpressionFunction, ExpressionFunctionScope, SignatureMatch};
 use crate::sema::verified::{VerifiedExprKind, VerifiedExpression};
 
-use super::AnalyzeState;
-use super::support::{ExprAnalysis, function_calls, substitute_expression};
+use super::support::{ExprAnalysis, LocalBinding, function_calls, substitute_expression};
+use super::{AnalyzeState, ExpressionFunctionMode};
 
 type FunctionKey = (ExpressionFunctionScope, String);
 
@@ -24,6 +24,10 @@ impl<'a> AnalyzeState<'a> {
     }
 
     for function in self.schema.expression_functions() {
+      self
+        .analyzer
+        .dialect
+        .validate(&function.expression, &mut self.diagnostics);
       self.validate_function_signature(function);
     }
 
@@ -41,6 +45,10 @@ impl<'a> AnalyzeState<'a> {
     span: SourceSpan,
     depth: usize,
   ) -> ExprAnalysis {
+    if self.analyzer.expression_function_mode == ExpressionFunctionMode::CallFrame {
+      return self.analyze_expression_function_call_frame(function, args, span, depth);
+    }
+
     if function.params.len() != args.len() {
       self.diagnostics.push(Diagnostic::new(
         format!(
@@ -84,6 +92,78 @@ impl<'a> AnalyzeState<'a> {
     analysis.cost += 1;
     analysis.nodes += 1;
     analysis
+  }
+
+  fn analyze_expression_function_call_frame(
+    &mut self,
+    function: &ExpressionFunction,
+    args: &[AstExpression],
+    span: SourceSpan,
+    depth: usize,
+  ) -> ExprAnalysis {
+    if function.params.len() != args.len() {
+      self.diagnostics.push(Diagnostic::new(
+        format!(
+          "function {} does not accept {} arguments",
+          function.name,
+          args.len()
+        ),
+        span,
+      ));
+      return ExprAnalysis::leaf(
+        VerifiedExpression::new(
+          VerifiedExprKind::ExpressionFunctionCall {
+            name: function.name.clone(),
+            params: function.params.clone(),
+            args: Vec::new(),
+            body: Box::new(VerifiedExpression::new(VerifiedExprKind::Null, span)),
+          },
+          span,
+        ),
+        None,
+      );
+    }
+
+    let key = function_key(function);
+    if self.active_functions.contains(&key) {
+      self.diagnostics.push(Diagnostic::new(
+        format!("recursive expression function {}", function.name),
+        span,
+      ));
+      return ExprAnalysis::leaf(VerifiedExpression::new(VerifiedExprKind::Null, span), None);
+    }
+
+    let args_analysis = self.analyze_args(args, depth);
+    let bindings = function
+      .params
+      .iter()
+      .cloned()
+      .zip(args_analysis.bindings.iter().cloned())
+      .collect::<BTreeMap<String, LocalBinding>>();
+
+    self.active_functions.push(key);
+    self.local_bindings.push(bindings);
+    let body = self.analyze_expression(&function.expression, depth + 1);
+    self.local_bindings.pop();
+    self.active_functions.pop();
+
+    ExprAnalysis::new(
+      VerifiedExpression::new(
+        VerifiedExprKind::ExpressionFunctionCall {
+          name: function.name.clone(),
+          params: function.params.clone(),
+          args: args_analysis.exprs,
+          body: Box::new(body.expr),
+        },
+        span,
+      ),
+      None,
+      None,
+      args_analysis.body_need.merge(body.body_need),
+      args_analysis.nodes + body.nodes + 1,
+      args_analysis.cost + body.cost + 1,
+    )
+    .with_mitigation_payload(args_analysis.mitigation_payload || body.mitigation_payload)
   }
 
   fn validate_function_signature(&mut self, function: &ExpressionFunction) {

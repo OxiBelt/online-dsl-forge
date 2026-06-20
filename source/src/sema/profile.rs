@@ -142,6 +142,18 @@ impl SecurityProfile {
     Self::waf(SecurityProfileId::WafStream, Phase::Stream)
   }
 
+  pub fn oxirule_waf_request() -> Self {
+    Self::oxirule_waf(SecurityProfileId::WafRequest, Phase::Request)
+  }
+
+  pub fn oxirule_waf_response() -> Self {
+    Self::oxirule_waf(SecurityProfileId::WafResponse, Phase::Response)
+  }
+
+  pub fn oxirule_waf_stream() -> Self {
+    Self::oxirule_waf(SecurityProfileId::WafStream, Phase::Stream)
+  }
+
   pub fn mitigation_field(phase: Phase) -> Self {
     let allowed_phases = BTreeSet::from([phase]);
     Self {
@@ -174,6 +186,13 @@ impl SecurityProfile {
       max_cost_units: 100_000,
       determinism: Determinism::Required,
       fail_closed: true,
+    }
+  }
+
+  fn oxirule_waf(id: SecurityProfileId, phase: Phase) -> Self {
+    Self {
+      default_regex_policy: RegexPolicy::DynamicWithBudget,
+      ..Self::waf(id, phase)
     }
   }
 }
