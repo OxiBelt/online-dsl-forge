@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
+
 use online_dsl_forge::parse_expression;
 use online_dsl_forge::sema::{
-  Analyzer, BodyAccess, CapabilityKind, CapabilityMeta, CapabilityTicket, CostModel,
-  ExpressionDialect, ExpressionFunctionMode, ExpressionFunctionScope, Phase, RegexFlavor,
-  RegexPolicy, RuntimeSchema, SecurityProfile, VerifiedExprKindRef,
+  Analyzer, BodyAccess, BodyNeedSummary, BodyTarget, CapabilityKind, CapabilityMeta,
+  CapabilityTicket, CostModel, ExpressionDialect, ExpressionFunctionMode, ExpressionFunctionScope,
+  Phase, RegexFlavor, RegexPolicy, RuntimeSchema, SecurityProfile, VerifiedExprKindRef,
 };
+use online_dsl_forge::{EvalLimits, MapRuntime, Value, default_registry, evaluate_verified};
 
 #[test]
 fn sema_compiles_to_verified_program() {
@@ -161,6 +164,28 @@ fn deterministic_profile_rejects_unsafe_capability_metadata() {
 }
 
 #[test]
+fn generic_transform_allows_larger_static_cost_than_generic_safe() {
+  let ast = parse_expression("expensive()").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_function_capability(
+    CapabilityMeta::function("expensive", 0).with_cost(CostModel::Constant(150_000)),
+  );
+
+  let safe_error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect_err("generic safe budget should reject expensive expressions");
+  assert!(
+    safe_error
+      .to_string()
+      .contains("static cost limit exceeded")
+  );
+
+  Analyzer::new(SecurityProfile::generic_transform())
+    .analyze(&ast, &schema)
+    .expect("generic transform budget should allow larger expressions");
+}
+
+#[test]
 fn operator_capabilities_are_verified_and_snapshot() {
   let ast = parse_expression("!enabled || score + 1 >= 10").expect("expression should parse");
   let mut schema = RuntimeSchema::new();
@@ -279,6 +304,154 @@ fn regex_forbid_policy_rejects_declared_regex_arguments() {
       .to_string()
       .contains("regex arguments are forbidden by profile")
   );
+}
+
+#[test]
+fn generic_safe_allows_dynamic_regex_by_default() {
+  let ast = parse_expression("name.matches(pattern)").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("name")
+    .add_variable("pattern")
+    .add_method_capability(
+      CapabilityMeta::method("matches", 1).with_regex_arg(0, RegexFlavor::Default),
+    );
+
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect("generic safe should preserve dynamic regex compatibility");
+
+  assert!(verified.regex_literals().is_empty());
+  assert!(verified.regex_cache().is_empty());
+}
+
+#[test]
+fn generic_safe_can_opt_into_literal_only_regex() {
+  let dynamic = parse_expression("name.matches(pattern)").expect("expression should parse");
+  let literal = parse_expression("name.matches(\"^pi\")").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("name")
+    .add_variable("pattern")
+    .add_method_capability(
+      CapabilityMeta::method("matches", 1).with_regex_arg(0, RegexFlavor::Default),
+    );
+  let profile =
+    SecurityProfile::generic_safe().with_regex_policy(RegexPolicy::LiteralOnlyPrecompiled);
+
+  let error = Analyzer::new(profile.clone())
+    .analyze(&dynamic, &schema)
+    .expect_err("literal-only regex policy should reject dynamic patterns");
+  assert!(
+    error
+      .to_string()
+      .contains("regex argument must be a string literal")
+  );
+
+  let verified = Analyzer::new(profile)
+    .analyze(&literal, &schema)
+    .expect("literal regex should precompile");
+  assert_eq!(verified.regex_literals().len(), 1);
+  assert_eq!(verified.regex_cache().len(), 1);
+}
+
+#[test]
+fn generic_safe_can_deny_host_declared_body_access() {
+  let ast =
+    parse_expression("event.payload.contains(\"secret\")").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("event")
+    .add_body_path(
+      ["event", "payload"],
+      BodyTarget::Request,
+      BodyAccess::PrefixBytes,
+    )
+    .add_method("contains", 1);
+  let profile = SecurityProfile::generic_safe().deny_body_access();
+
+  let error = Analyzer::new(profile)
+    .analyze(&ast, &schema)
+    .expect_err("body access should exceed the denied generic profile limit");
+
+  assert!(
+    error
+      .to_string()
+      .contains("body access limit exceeded by profile")
+  );
+}
+
+#[test]
+fn generic_safe_can_allow_host_declared_body_access_after_denying_it() {
+  let ast =
+    parse_expression("event.payload.contains(\"secret\")").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("event")
+    .add_body_path(
+      ["event", "payload"],
+      BodyTarget::Request,
+      BodyAccess::PrefixBytes,
+    )
+    .add_method("contains", 1);
+  let profile = SecurityProfile::generic_safe()
+    .deny_body_access()
+    .allow_body_access();
+
+  let verified = Analyzer::new(profile)
+    .analyze(&ast, &schema)
+    .expect("body access should be allowed after clearing the limit");
+
+  assert_eq!(verified.body_need().request, BodyAccess::PrefixBytes);
+}
+
+#[test]
+fn generic_safe_can_limit_body_access_by_target() {
+  let ast = parse_expression("event.payload_size > 0").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("event").add_body_path(
+    ["event", "payload_size"],
+    BodyTarget::Request,
+    BodyAccess::SizeOnly,
+  );
+  let profile = SecurityProfile::generic_safe().with_body_access_limit(Some(BodyNeedSummary {
+    request: BodyAccess::SizeOnly,
+    response: BodyAccess::None,
+    stream: BodyAccess::None,
+  }));
+
+  let verified = Analyzer::new(profile)
+    .analyze(&ast, &schema)
+    .expect("size-only body access should fit the profile limit");
+
+  assert_eq!(verified.body_need().request, BodyAccess::SizeOnly);
+}
+
+#[test]
+fn generic_profile_compiles_and_evaluates_non_waf_host_data() {
+  let ast =
+    parse_expression("items.contains(\"pi\") && user.name.starts_with(\"pi\") && len(items) == 2")
+      .expect("expression should parse");
+  let mut user = BTreeMap::new();
+  user.insert("name".to_string(), Value::String("piquark".to_string()));
+  let mut variables = BTreeMap::new();
+  variables.insert(
+    "items".to_string(),
+    Value::Array(vec![
+      Value::String("pi".to_string()),
+      Value::String("tau".to_string()),
+    ]),
+  );
+  variables.insert("user".to_string(), Value::Object(user));
+  let runtime = MapRuntime::new(variables, default_registry());
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &runtime.schema())
+    .expect("generic profile should analyze non-WAF host data");
+
+  let value = evaluate_verified(&verified, &runtime, EvalLimits::default())
+    .expect("generic profile expression should evaluate");
+
+  assert_eq!(value, Value::Bool(true));
 }
 
 #[test]

@@ -24,6 +24,8 @@ and CLI tooling.
 - Deterministic canonical expression formatter.
 - Compile-time validation against host-provided runtime schemas and security
   profiles.
+- Non-WAF `GenericSafe` and `GenericTransform` profiles with opt-in stricter
+  regex and body-access admission controls.
 - Bounded in-memory evaluation with a dynamic variable, function, method, and
   operator registry that evaluates verified programs.
 - `online-dsl-forgectl` commands for `check`, `ast`, `fmt`, and `eval`.

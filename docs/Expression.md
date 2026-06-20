@@ -50,6 +50,25 @@ the verified precompiled cache through `RuntimeCallContext`. If a handler asks
 for a precompiled regex that was not admitted during analysis, evaluation fails
 closed.
 
+Non-WAF hosts should start with `SecurityProfile::generic_safe()` for ordinary
+filtering and decision expressions over host-provided JSON-like objects.
+`SecurityProfile::generic_transform()` keeps the same deterministic baseline
+but allows larger AST, call-depth, and static-cost budgets for transformation
+workloads. Hosts can derive stricter profiles with
+`with_regex_policy(RegexPolicy::LiteralOnlyPrecompiled)`,
+`deny_body_access()`, or `with_body_access_limit(...)` when untrusted
+expressions must not inspect host-declared payload fields.
+
+```rust
+let ast = online_dsl_forge::parse_expression(
+  "items.contains(\"pi\") && user.name.starts_with(\"pi\")",
+)?;
+let profile = online_dsl_forge::SecurityProfile::generic_safe()
+  .with_regex_policy(online_dsl_forge::RegexPolicy::LiteralOnlyPrecompiled)
+  .deny_body_access();
+let verified = online_dsl_forge::Analyzer::new(profile).analyze(&ast, &schema)?;
+```
+
 ## Operators
 
 Precedence from highest to lowest:

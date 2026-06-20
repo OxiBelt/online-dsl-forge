@@ -45,6 +45,10 @@ impl BodyAccess {
     self.max(other)
   }
 
+  pub fn allows(self, needed: Self) -> bool {
+    self >= needed
+  }
+
   pub fn reads_payload(self) -> bool {
     matches!(self, Self::PrefixBytes)
   }
@@ -73,6 +77,18 @@ pub struct BodyNeedSummary {
 }
 
 impl BodyNeedSummary {
+  pub fn none() -> Self {
+    Self::default()
+  }
+
+  pub fn all(access: BodyAccess) -> Self {
+    Self {
+      request: access,
+      response: access,
+      stream: access,
+    }
+  }
+
   pub fn merge(self, other: Self) -> Self {
     Self {
       request: self.request.merge(other.request),
@@ -92,6 +108,12 @@ impl BodyNeedSummary {
   pub fn reads_payload(self) -> bool {
     self.request.reads_payload() || self.response.reads_payload() || self.stream.reads_payload()
   }
+
+  pub fn allows(self, needed: Self) -> bool {
+    self.request.allows(needed.request)
+      && self.response.allows(needed.response)
+      && self.stream.allows(needed.stream)
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -104,6 +126,8 @@ pub struct SecurityProfile {
   pub max_cost_units: u64,
   pub determinism: Determinism,
   pub fail_closed: bool,
+  #[serde(default)]
+  pub body_access_limit: Option<BodyNeedSummary>,
 }
 
 impl SecurityProfile {
@@ -117,6 +141,7 @@ impl SecurityProfile {
       max_cost_units: 100_000,
       determinism: Determinism::Required,
       fail_closed: true,
+      body_access_limit: None,
     }
   }
 
@@ -165,7 +190,26 @@ impl SecurityProfile {
       max_cost_units: 50_000,
       determinism: Determinism::Required,
       fail_closed: true,
+      body_access_limit: None,
     }
+  }
+
+  pub fn with_regex_policy(mut self, policy: RegexPolicy) -> Self {
+    self.default_regex_policy = policy;
+    self
+  }
+
+  pub fn with_body_access_limit(mut self, limit: Option<BodyNeedSummary>) -> Self {
+    self.body_access_limit = limit;
+    self
+  }
+
+  pub fn deny_body_access(self) -> Self {
+    self.with_body_access_limit(Some(BodyNeedSummary::none()))
+  }
+
+  pub fn allow_body_access(self) -> Self {
+    self.with_body_access_limit(None)
   }
 
   pub fn active_phase(&self) -> Option<Phase> {
@@ -186,6 +230,7 @@ impl SecurityProfile {
       max_cost_units: 100_000,
       determinism: Determinism::Required,
       fail_closed: true,
+      body_access_limit: None,
     }
   }
 

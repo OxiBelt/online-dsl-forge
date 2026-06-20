@@ -87,6 +87,7 @@ and security profile. Validation covers:
 - mitigation-field restrictions that reject `Request.Body`, `Response.Body`,
   or `Stream.Payload` access, including through expression functions
 - regex admission policy and literal regex precompilation for strict profiles
+- optional profile-level body-access limits
 - static AST node, call-depth, and cost limits
 
 `ExpressionDialect::OxiRuleV1` is an embedding compatibility gate for
@@ -135,6 +136,18 @@ compatibility profiles use the WAF phase/body/cost limits but keep
 `RegexPolicy::DynamicWithBudget` so existing OxiBelt rules with dynamic regex
 arguments continue to validate. The stricter `waf_*` profiles remain
 literal-regex-only.
+
+`SecurityProfile::generic_safe()` is the default non-WAF embedding profile. It
+keeps `RegexPolicy::DynamicWithBudget` for compatibility, requires
+deterministic and side-effect-free capabilities, fails closed, and uses modest
+AST, call-depth, and static-cost budgets. Hosts that need stricter admission can
+derive from it with `with_regex_policy(RegexPolicy::LiteralOnlyPrecompiled)`,
+`deny_body_access()`, or `with_body_access_limit(...)`.
+
+`SecurityProfile::generic_transform()` is for non-WAF transformation and
+normalization workloads. It keeps the same deterministic and fail-closed
+baseline as `generic_safe`, but raises AST, call-depth, and static-cost budgets
+for expressions that operate over larger host-provided objects or collections.
 
 The compatibility `compile_expression` API uses the generic safe profile and
 returns a `CompiledExpression` backed by sema's verified program.

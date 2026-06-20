@@ -157,6 +157,14 @@ impl<'a> AnalyzeState<'a> {
         .diagnostics
         .push(Diagnostic::new("static cost limit exceeded", span));
     }
+    if let Some(limit) = self.analyzer.profile.body_access_limit
+      && !limit.allows(analysis.body_need)
+    {
+      self.diagnostics.push(Diagnostic::new(
+        "body access limit exceeded by profile",
+        span,
+      ));
+    }
     if matches!(self.analyzer.profile.id, SecurityProfileId::MitigationField)
       && analysis.mitigation_payload
     {
