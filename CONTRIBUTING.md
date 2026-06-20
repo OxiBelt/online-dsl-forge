@@ -8,9 +8,9 @@ must be reviewed as
 security-sensitive unless there is a clear reason they are not.
 
 Use root-relative paths in root-level documentation, scripts, issues, and pull
-request notes. For example, prefer `parser/src/parser.rs` over `src/parser.rs`
-unless the text explicitly says the command is being run from a crate
-subdirectory.
+request notes. For example, prefer `source/src/parser/parse.rs` over
+`src/parser/parse.rs` unless the text explicitly says the command is being run
+from a crate subdirectory.
 
 ## Repository Layout
 
@@ -20,14 +20,14 @@ be committed.
 
 | Path | Purpose | Change here when |
 | --- | --- | --- |
-| `parser/` | Parser Rust crate. | You are changing lexer, parser, AST, diagnostics, spans, or canonical formatting behavior. |
-| `parser/src/ast.rs` | Public AST model. | Syntax shape, serde AST, spans, or canonical representation changes. |
-| `parser/src/parser.rs` and `parser/src/lexer.rs` | Handwritten parser pipeline. | Tokens, grammar, precedence, diagnostics, or parse recovery change. |
-| `parser/src/format.rs` | Canonical formatting. | Normalized expression output or idempotency changes. |
-| `sema/` | Semantic analysis Rust crate. | You are changing runtime schemas, security profiles, capability metadata, regex policy, body-need inference, or verified IR. |
-| `sema/src/analyzer.rs` | Semantic analyzer. | Validation traversal, diagnostics, phase restrictions, cost limits, regex checks, or body-access inference change. |
-| `sema/src/schema.rs` and `sema/src/profile.rs` | Host schema and security profile model. | Public semantic API, capability metadata, profile defaults, or body-access types change. |
-| `source/` | Umbrella Rust crate and CLI. | You are changing runtime, CLI, public re-exports, compatibility compile API, or integration behavior. |
+| `source/` | Single publishable Rust crate and CLI. | You are changing parser, semantic analysis, runtime, CLI, public re-exports, compile API, or integration behavior. |
+| `source/src/parser/` | Parser, AST, diagnostics, spans, and formatter modules. | You are changing lexer, parser, AST, diagnostics, spans, or canonical formatting behavior. |
+| `source/src/parser/ast.rs` | Public AST model. | Syntax shape, serde AST, spans, or canonical representation changes. |
+| `source/src/parser/parse.rs` and `source/src/parser/lexer.rs` | Handwritten parser pipeline. | Tokens, grammar, precedence, diagnostics, or parse recovery change. |
+| `source/src/parser/format.rs` | Canonical formatting. | Normalized expression output or idempotency changes. |
+| `source/src/sema/` | Semantic analysis modules. | You are changing runtime schemas, security profiles, capability metadata, regex policy, body-need inference, or verified IR. |
+| `source/src/sema/analyzer.rs` | Semantic analyzer. | Validation traversal, diagnostics, phase restrictions, cost limits, regex checks, or body-access inference change. |
+| `source/src/sema/schema.rs` and `source/src/sema/profile.rs` | Host schema and security profile model. | Public semantic API, capability metadata, profile defaults, or body-access types change. |
 | `source/src/compile.rs` | Compatibility re-exports for semantic validation. | Public compile API exports change. |
 | `source/src/runtime.rs` and `source/src/value.rs` | Evaluation and host integration. | Values, function/method/operator registry, limits, or evaluation semantics change. |
 | `source/src/bin/` | CLI tooling. | `online-dsl-forgectl` commands or command output changes. |
@@ -76,13 +76,10 @@ pnpm run test
 pnpm run versioning:check
 ```
 
-The committed Cargo version for `online-dsl-forge-parser`,
-`online-dsl-forge-sema`, and `online-dsl-forge` must remain `0.0.0` in
-`parser/Cargo.toml`, `sema/Cargo.toml`, `source/Cargo.toml`, and `Cargo.lock`.
-Release CI derives the publish version from the triggering SemVer tag, rewrites
-all three crates in the checkout for that workflow run, publishes
-`online-dsl-forge-parser` first, then `online-dsl-forge-sema`, and then the
-umbrella `online-dsl-forge` crate.
+The committed Cargo version for `online-dsl-forge` must remain `0.0.0` in
+`source/Cargo.toml` and `Cargo.lock`. Release CI derives the publish version
+from the triggering SemVer tag, rewrites the single crate in the checkout for
+that workflow run, and publishes only the `online-dsl-forge` crate.
 
 ## Commit Messages
 
@@ -121,7 +118,7 @@ new Rust module or source file under the most appropriate directory and wire it
 through `lib.rs` or the relevant binary as needed.
 
 Treat 750 lines as the review threshold for Rust source files under
-`parser/src/`, `sema/src/`, and `source/src/`. Files above that threshold should
+`source/src/`. Files above that threshold should
 be split into smaller responsibility-focused modules unless there is a
 documented reason to keep the implementation together.
 
@@ -130,7 +127,7 @@ Keep module boundaries explicit:
 - Lexing and tokenization should not be placed in runtime files.
 - Parse-tree and public AST definitions should not be mixed with evaluation.
 - Security profiles, capability metadata, regex policy, and verified IR belong
-  in `sema/`, not in parser or runtime files.
+  in `source/src/sema/`, not in parser or runtime files.
 - Host registry behavior should stay in runtime-focused modules.
 - CLI argument handling should stay in binary or CLI support modules.
 - Detailed syntax rules belong in `docs/Expression.md`, not only in comments.

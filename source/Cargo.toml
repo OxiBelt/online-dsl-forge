@@ -10,8 +10,7 @@ readme = "README.md"
 publish = false
 
 [dependencies]
-online-dsl-forge-parser = { path = "../parser", version = "0.0.0" }
-online-dsl-forge-sema = { path = "../sema", version = "0.0.0" }
+regex = "1.12.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 
@@ -22,6 +21,14 @@ path = "src/bin/online-dsl-forgectl.rs"
 [[test]]
 name = "public_api"
 path = "../tests/rust/public_api.rs"
+
+[[test]]
+name = "parser_api"
+path = "../tests/rust/parser_api.rs"
+
+[[test]]
+name = "sema_api"
+path = "../tests/rust/sema_api.rs"
 
 [[test]]
 name = "cli"

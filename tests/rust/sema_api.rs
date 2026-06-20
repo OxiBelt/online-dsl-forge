@@ -1,5 +1,5 @@
-use online_dsl_forge_parser::parse_expression;
-use online_dsl_forge_sema::{
+use online_dsl_forge::parse_expression;
+use online_dsl_forge::sema::{
   Analyzer, BodyAccess, CapabilityMeta, RegexFlavor, RuntimeSchema, SecurityProfile,
 };
 

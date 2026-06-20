@@ -1,4 +1,4 @@
-use online_dsl_forge_sema::{CapabilityKind, VerifiedProgram};
+use crate::sema::{CapabilityKind, VerifiedProgram};
 
 use super::{DynamicRegistry, EvalError};
 

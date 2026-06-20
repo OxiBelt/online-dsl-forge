@@ -1,7 +1,9 @@
 //! In-memory DSL parser, canonical AST, compiler, and bounded runtime.
 
 pub mod compile;
+pub mod parser;
 pub mod runtime;
+pub mod sema;
 pub mod value;
 
 pub use compile::{
@@ -11,11 +13,10 @@ pub use compile::{
   SignatureMatch, TypeClass, VariableMeta, VerifiedExprKindRef, VerifiedExpression,
   VerifiedProgram, compile_expression,
 };
-pub use online_dsl_forge_parser::{
+pub use parser::{
   AstExpression, BinaryOp, Diagnostic, DiagnosticReport, ExprKind, SourceSpan, UnaryOp, ast,
-  diagnostics, format, format_expression, lexer, parse_expression, parser, span,
+  diagnostics, format, format_expression, lexer, parse_expression, span,
 };
-pub use online_dsl_forge_sema as sema;
 pub use runtime::{
   DynamicRegistry, EvalError, EvalLimits, MapRuntime, RuntimeContext, default_registry, evaluate,
   evaluate_verified,

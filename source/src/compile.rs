@@ -1,4 +1,4 @@
-pub use online_dsl_forge_sema::{
+pub use crate::sema::{
   Analyzer, BodyAccess, BodyNeedSummary, BodyPathRule, BodyTarget, CapabilityKind, CapabilityMeta,
   CapabilityTicket, CompileOptions, CompiledExpression, CostModel, Determinism, ExpressionFunction,
   Phase, RegexArgMeta, RegexFlavor, RegexPolicy, RuntimeSchema, SecurityProfile, SecurityProfileId,

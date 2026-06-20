@@ -5,8 +5,8 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use online_dsl_forge_parser::{BinaryOp, SourceSpan, UnaryOp};
-use online_dsl_forge_sema::{VerifiedExprKindRef, VerifiedExpression, VerifiedProgram};
+use crate::parser::{BinaryOp, SourceSpan, UnaryOp};
+use crate::sema::{VerifiedExprKindRef, VerifiedExpression, VerifiedProgram};
 
 use crate::compile::{
   CapabilityKind, CapabilityMeta, CapabilityTicket, CompiledExpression, RuntimeSchema,

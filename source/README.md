@@ -6,16 +6,14 @@ in memory.
 
 The crate exists for host applications that need a canonical runtime and
 operator interface for DSL expressions without adopting a general-purpose
-scripting language. It re-exports the publishable `online-dsl-forge-parser`
-syntax crate and exposes sema-backed compile validation, a dynamic runtime
-registry, and CLI tooling.
+scripting language. It contains the parser, semantic compile validation, a
+dynamic runtime registry, and CLI tooling in one publishable package.
 
 ## Capabilities
 
-- Re-exported handwritten lexer, recursive-descent expression parser,
-  span-carrying AST, diagnostics, and formatter from `online-dsl-forge-parser`.
-- Re-exported semantic analyzer, runtime schemas, security profiles, and
-  verified IR from `online-dsl-forge-sema`.
+- Handwritten lexer, recursive-descent expression parser, span-carrying AST,
+  diagnostics, and formatter.
+- Semantic analyzer, runtime schemas, security profiles, and verified IR.
 - Compile-time validation against host-provided runtime schemas and security
   profiles.
 - Bounded in-memory evaluation with a dynamic variable, function, method, and

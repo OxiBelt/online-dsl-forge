@@ -9,12 +9,11 @@ Expression syntax is covered in [Expression.md](Expression.md).
 
 ## Scope
 
-`online-dsl-forge-parser` parses and canonicalizes bounded DSL expressions.
-`online-dsl-forge-sema` validates parsed ASTs against runtime schemas and
-security profiles, then emits verified programs. The umbrella
-`online-dsl-forge` crate re-exports those APIs and adds bounded runtime
-evaluation. Host applications provide runtime bindings, functions, methods,
-and optional operator overrides through Rust APIs.
+The single `online-dsl-forge` crate parses and canonicalizes bounded DSL
+expressions, validates parsed ASTs against runtime schemas and security
+profiles, emits verified programs, and provides bounded runtime evaluation.
+Host applications provide runtime bindings, functions, methods, and optional
+operator overrides through Rust APIs.
 
 The implementation is optimized for:
 
@@ -44,9 +43,9 @@ mutation, callbacks, async execution, external I/O, or arbitrary scripting.
 
 ## Parser and AST
 
-The `online-dsl-forge-parser` crate contains the handwritten recursive-descent
-parser. It produces a public AST where every node carries a byte span into the
-original source text.
+The parser module contains the handwritten recursive-descent parser. It
+produces a public AST where every node carries a byte span into the original
+source text.
 
 The public AST is serializable with `serde`. Serialized AST shape is part of the
 public compatibility surface and should change only with documentation and
@@ -111,7 +110,7 @@ Runtime values are JSON-compatible: null, booleans, integers, floats, strings,
 arrays, and objects.
 
 Compiled expressions are validation artifacts. Host applications should parse
-and analyze expressions through `online-dsl-forge-sema`; they should not treat
+and analyze expressions through `online-dsl-forge`; they should not treat
 serialized ASTs or external data as already verified runtime input.
 
 ## CLI

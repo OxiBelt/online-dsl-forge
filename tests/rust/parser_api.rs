@@ -1,8 +1,8 @@
-use online_dsl_forge_parser::{DiagnosticReport, ExprKind, format_expression, parse_expression};
+use online_dsl_forge::{DiagnosticReport, ExprKind, format_expression, parse_expression};
 use serde_json::json;
 
 #[test]
-fn parser_crate_parses_formats_and_serializes_ast() {
+fn parser_api_parses_formats_and_serializes_ast() {
   let ast =
     parse_expression("score + 1 >= 10 && name.starts_with('pi')").expect("expression should parse");
 
@@ -21,7 +21,7 @@ fn parser_crate_parses_formats_and_serializes_ast() {
 }
 
 #[test]
-fn parser_crate_reports_diagnostics() {
+fn parser_api_reports_diagnostics() {
   let error = parse_expression("1 +").expect_err("invalid expression should fail");
   let report: DiagnosticReport = error;
 

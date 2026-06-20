@@ -1,8 +1,8 @@
 # online-dsl-forge
 
-`online-dsl-forge` is a Rust library for parsing, canonicalizing,
-semantically validating, compiling, and evaluating a small bounded DSL
-expression language in memory.
+`online-dsl-forge` is a single publishable Rust crate for parsing,
+canonicalizing, semantically validating, compiling, and evaluating a small
+bounded DSL expression language in memory.
 
 The project exists for host applications that need a canonical runtime and
 operator interface for DSL expressions without adopting a general-purpose
@@ -12,11 +12,12 @@ and CLI tooling.
 
 ## Capabilities
 
-- Publishable `online-dsl-forge-parser` crate with a handwritten lexer,
-  recursive-descent expression parser, AST, diagnostics, spans, and formatter.
-- Publishable `online-dsl-forge-sema` crate with runtime schemas, security
-  profiles, capability metadata, body-need inference, regex admission, and
-  verified IR.
+- Single publishable `online-dsl-forge` crate containing the parser, semantic
+  analyzer, runtime, and CLI.
+- Handwritten lexer, recursive-descent expression parser, AST, diagnostics,
+  spans, and formatter.
+- Runtime schemas, security profiles, capability metadata, body-need inference,
+  regex admission, and verified IR.
 - Stable span-carrying AST with `serde` serialization.
 - Deterministic canonical expression formatter.
 - Compile-time validation against host-provided runtime schemas and security
@@ -60,12 +61,10 @@ cargo run --manifest-path source/Cargo.toml --bin online-dsl-forgectl -- \
 ## Project Layout
 
 ```text
-parser/                       Parser, AST, diagnostics, spans, and formatter crate
-sema/                         Semantic analyzer, security profiles, and verified IR crate
-source/                       Umbrella Rust library and CLI crate
-parser/src/                   Syntax-only parser library source
-sema/src/                     Runtime schemas, analyzer, profile model, and verified IR
-source/src/                   Runtime, values, re-exports, compatibility compile API, and CLI
+source/                       Single publishable Rust library and CLI crate
+source/src/parser/            Parser, AST, diagnostics, spans, and formatter modules
+source/src/sema/              Runtime schemas, analyzer, profile model, and verified IR
+source/src/                   Runtime, values, re-exports, compile API, and CLI
 tests/rust/                   Repository-level Rust integration tests
 tests/scripts/                Local and CI check scripts
 docs/                         Specification and expression reference
