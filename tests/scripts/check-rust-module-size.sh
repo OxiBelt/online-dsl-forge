@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
-source_root="${repo_root}/source/src"
+source_roots=("${repo_root}/parser/src" "${repo_root}/source/src")
 max_lines="${ONLINE_DSL_FORGE_RUST_SOURCE_LINE_LIMIT:-750}"
 
 checked=0
@@ -23,7 +23,7 @@ while IFS= read -r file; do
   printf '  %s: %s lines (target %s)\n' \
     "${rel_path}" "${line_count}" "${max_lines}" >&2
   violations=$((violations + 1))
-done < <(find "${source_root}" -type f -name '*.rs' | sort)
+done < <(find "${source_roots[@]}" -type f -name '*.rs' | sort)
 
 if (( violations > 0 )); then
   cat >&2 <<EOF

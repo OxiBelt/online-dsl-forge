@@ -8,9 +8,11 @@ Expression syntax is covered in [Expression.md](Expression.md).
 
 ## Scope
 
-`online-dsl-forge` parses, canonicalizes, validates, and evaluates bounded DSL
-expressions in memory. Host applications provide runtime bindings, functions,
-methods, and optional operator overrides through Rust APIs.
+`online-dsl-forge-parser` parses and canonicalizes bounded DSL expressions.
+The umbrella `online-dsl-forge` crate re-exports that parser API and adds
+compile validation plus bounded runtime evaluation. Host applications provide
+runtime bindings, functions, methods, and optional operator overrides through
+Rust APIs.
 
 The implementation is optimized for:
 
@@ -39,8 +41,9 @@ mutation, callbacks, async execution, external I/O, or arbitrary scripting.
 
 ## Parser and AST
 
-The parser is handwritten and recursive-descent. It produces a public AST where
-every node carries a byte span into the original source text.
+The `online-dsl-forge-parser` crate contains the handwritten recursive-descent
+parser. It produces a public AST where every node carries a byte span into the
+original source text.
 
 The public AST is serializable with `serde`. Serialized AST shape is part of the
 public compatibility surface and should change only with documentation and

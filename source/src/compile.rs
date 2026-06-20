@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use online_dsl_forge_parser::{AstExpression, Diagnostic, DiagnosticReport, ExprKind};
 use serde::{Deserialize, Serialize};
-
-use crate::ast::{AstExpression, ExprKind};
-use crate::diagnostics::{Diagnostic, DiagnosticReport};
 
 #[derive(Debug, Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RuntimeSchema {

@@ -1,0 +1,20 @@
+[package]
+name = "online-dsl-forge-parser"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+description = "Handwritten parser, canonical AST, diagnostics, spans, and formatter for online-dsl-forge."
+repository = "https://github.com/OxiBelt/online-dsl-forge"
+readme = "README.md"
+publish = false
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.150"
+
+[[test]]
+name = "parser_api"
+path = "../tests/rust/parser_api.rs"

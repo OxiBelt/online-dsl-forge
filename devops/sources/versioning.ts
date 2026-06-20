@@ -12,18 +12,25 @@ const PlaceholderVersion = '0.0.0'
 type CliParameters = {
   Ref?: string
   WorkspacePath: string
-  ManifestPath: string
+  ManifestPath?: string
   LockfilePath: string
-  PackageName: string
+  PackageName?: string
+  Packages?: string
   ReleasePublish?: boolean | string
+}
+
+export type PackageSpec = {
+  packageName: string
+  manifestPath: string
 }
 
 export type VersioningOptions = {
   ref?: string
   workspacePath: string
-  manifestPath: string
+  manifestPath?: string
   lockfilePath: string
-  packageName: string
+  packageName?: string
+  packages?: PackageSpec[]
   releasePublish: boolean
 }
 
@@ -34,6 +41,10 @@ type VersioningResult = {
 }
 
 type TomlRecord = Record<string, unknown>
+
+type ResolvedPackageSpec = PackageSpec & {
+  resolvedManifestPath: string
+}
 
 function isRecord(value: unknown): value is TomlRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -109,6 +120,76 @@ function resolveWorkspaceFile(workspacePath: string, relativePath: string, label
   return resolved
 }
 
+function packageSpecsFromOptions(options: VersioningOptions): PackageSpec[] {
+  if (options.packages !== undefined && options.packages.length > 0) {
+    return assertUniquePackageSpecs(options.packages)
+  }
+
+  if (options.manifestPath !== undefined && options.packageName !== undefined) {
+    return [{ packageName: options.packageName, manifestPath: options.manifestPath }]
+  }
+
+  throw new Error('versioning requires either --packages or both --manifest-path and --package-name')
+}
+
+function assertUniquePackageSpecs(packages: PackageSpec[]): PackageSpec[] {
+  const names = new Set<string>()
+  const manifestPaths = new Set<string>()
+
+  for (const pkg of packages) {
+    if (pkg.packageName.trim() === '') {
+      throw new Error('package names must not be empty')
+    }
+
+    if (pkg.manifestPath.trim() === '') {
+      throw new Error(`manifest path for ${pkg.packageName} must not be empty`)
+    }
+
+    if (names.has(pkg.packageName)) {
+      throw new Error(`duplicate package name: ${pkg.packageName}`)
+    }
+    names.add(pkg.packageName)
+
+    if (manifestPaths.has(pkg.manifestPath)) {
+      throw new Error(`duplicate package manifest path: ${pkg.manifestPath}`)
+    }
+    manifestPaths.add(pkg.manifestPath)
+  }
+
+  return packages
+}
+
+function resolvePackageSpecs(workspacePath: string, packages: PackageSpec[]): ResolvedPackageSpec[] {
+  return packages.map(pkg => ({
+    ...pkg,
+    resolvedManifestPath: resolveWorkspaceFile(
+      workspacePath,
+      pkg.manifestPath,
+      `${pkg.packageName} manifest path`
+    )
+  }))
+}
+
+function parsePackageSpecs(value: string): PackageSpec[] {
+  const packages = value.split(',').map(entry => {
+    const separator = entry.indexOf('=')
+    if (separator <= 0 || separator === entry.length - 1) {
+      throw new Error(`package entries must use name=manifest-path: ${entry}`)
+    }
+
+    return {
+      packageName: entry.slice(0, separator).trim(),
+      manifestPath: entry.slice(separator + 1).trim()
+    }
+  })
+
+  return assertUniquePackageSpecs(packages)
+}
+
+function displayPackageNames(packages: PackageSpec[]): string {
+  return packages.map(pkg => pkg.packageName).join(',')
+}
+
 function packageTable(manifest: TomlRecord, manifestPath: string): TomlRecord {
   const packageData = manifest.package
 
@@ -172,6 +253,44 @@ function assertLockfileState(lockfilePath: string, packageName: string, expected
   }
 }
 
+function dependencyTables(manifest: TomlRecord): TomlRecord[] {
+  return ['dependencies', 'dev-dependencies', 'build-dependencies']
+    .map(name => manifest[name])
+    .filter(isRecord)
+}
+
+function dependencyVersion(dependency: unknown): string | undefined {
+  if (typeof dependency === 'string') {
+    return dependency
+  }
+
+  if (isRecord(dependency) && typeof dependency.version === 'string') {
+    return dependency.version
+  }
+
+  return undefined
+}
+
+function assertLocalPackageDependencyVersions(
+  manifestPath: string,
+  packageNames: Set<string>,
+  expectedVersion: string
+): void {
+  const manifest = parseToml(Fs.readFileSync(manifestPath, 'utf8'), manifestPath)
+
+  for (const table of dependencyTables(manifest)) {
+    for (const [dependencyName, dependency] of Object.entries(table)) {
+      if (!packageNames.has(dependencyName)) {
+        continue
+      }
+
+      if (dependencyVersion(dependency) !== expectedVersion) {
+        throw new Error(`${manifestPath} dependency ${dependencyName} version must be ${expectedVersion}`)
+      }
+    }
+  }
+}
+
 function packageSectionRange(content: string, manifestPath: string): [number, number] {
   const packageMatch = /^\[package\]\s*$/m.exec(content)
 
@@ -209,6 +328,38 @@ function removePackagePublishFalse(content: string, manifestPath: string): strin
   }
 
   return `${content.slice(0, start)}${nextSection}${content.slice(end)}`
+}
+
+function replaceLocalPackageDependencyVersions(
+  content: string,
+  manifestPath: string,
+  packageNames: Set<string>,
+  version: string
+): string {
+  let nextContent = content
+
+  for (const packageName of packageNames) {
+    const escapedPackageName = escapeRegExp(packageName)
+    const dependencyLine = new RegExp(
+      `^(\\s*${escapedPackageName}\\s*=\\s*\\{[^\\n]*\\bversion\\s*=\\s*")([^"]*)("[^\\n]*\\}\\s*)$`,
+      'm'
+    )
+    const hasDependency = new RegExp(`^\\s*${escapedPackageName}\\s*=`, 'm').test(nextContent)
+    let replaced = false
+
+    nextContent = nextContent.replace(dependencyLine, (_match, before: string, _oldVersion: string, after: string) => {
+      replaced = true
+      return `${before}${version}${after}`
+    })
+
+    if (hasDependency && !replaced) {
+      throw new Error(
+        `${manifestPath} dependency ${packageName} must use an inline table with a version field`
+      )
+    }
+  }
+
+  return nextContent
 }
 
 function lockPackageBlockRanges(content: string): Array<[number, number]> {
@@ -261,16 +412,21 @@ function escapeRegExp(value: string): string {
 
 export function runVersioning(options: VersioningOptions): VersioningResult {
   const workspacePath = resolveWorkspacePath(options.workspacePath)
-  const manifestPath = resolveWorkspaceFile(workspacePath, options.manifestPath, 'manifest path')
   const lockfilePath = resolveWorkspaceFile(workspacePath, options.lockfilePath, 'lockfile path')
+  const packages = resolvePackageSpecs(workspacePath, packageSpecsFromOptions(options))
+  const packageNames = new Set(packages.map(pkg => pkg.packageName))
+  const packageName = displayPackageNames(packages)
 
   if (!options.releasePublish) {
-    assertManifestState(manifestPath, options.packageName, PlaceholderVersion, true)
-    assertLockfileState(lockfilePath, options.packageName, PlaceholderVersion)
+    for (const pkg of packages) {
+      assertManifestState(pkg.resolvedManifestPath, pkg.packageName, PlaceholderVersion, true)
+      assertLockfileState(lockfilePath, pkg.packageName, PlaceholderVersion)
+      assertLocalPackageDependencyVersions(pkg.resolvedManifestPath, packageNames, PlaceholderVersion)
+    }
 
     return {
       mode: 'check',
-      packageName: options.packageName,
+      packageName,
       version: PlaceholderVersion
     }
   }
@@ -281,29 +437,44 @@ export function runVersioning(options: VersioningOptions): VersioningResult {
 
   const version = cleanVersionFromTagRef(options.ref)
 
-  assertManifestState(manifestPath, options.packageName, PlaceholderVersion, true)
-  assertLockfileState(lockfilePath, options.packageName, PlaceholderVersion)
+  for (const pkg of packages) {
+    assertManifestState(pkg.resolvedManifestPath, pkg.packageName, PlaceholderVersion, true)
+    assertLockfileState(lockfilePath, pkg.packageName, PlaceholderVersion)
+    assertLocalPackageDependencyVersions(pkg.resolvedManifestPath, packageNames, PlaceholderVersion)
+  }
 
-  const nextManifest = removePackagePublishFalse(
-    replacePackageVersion(Fs.readFileSync(manifestPath, 'utf8'), manifestPath, version),
-    manifestPath
-  )
-  const nextLockfile = updateLockPackageVersion(
-    Fs.readFileSync(lockfilePath, 'utf8'),
-    lockfilePath,
-    options.packageName,
-    version
-  )
+  for (const pkg of packages) {
+    const nextManifest = replaceLocalPackageDependencyVersions(
+      removePackagePublishFalse(
+        replacePackageVersion(
+          Fs.readFileSync(pkg.resolvedManifestPath, 'utf8'),
+          pkg.resolvedManifestPath,
+          version
+        ),
+        pkg.resolvedManifestPath
+      ),
+      pkg.resolvedManifestPath,
+      packageNames,
+      version
+    )
+    Fs.writeFileSync(pkg.resolvedManifestPath, nextManifest)
+  }
 
-  Fs.writeFileSync(manifestPath, nextManifest)
+  let nextLockfile = Fs.readFileSync(lockfilePath, 'utf8')
+  for (const pkg of packages) {
+    nextLockfile = updateLockPackageVersion(nextLockfile, lockfilePath, pkg.packageName, version)
+  }
   Fs.writeFileSync(lockfilePath, nextLockfile)
 
-  assertManifestState(manifestPath, options.packageName, version, false)
-  assertLockfileState(lockfilePath, options.packageName, version)
+  for (const pkg of packages) {
+    assertManifestState(pkg.resolvedManifestPath, pkg.packageName, version, false)
+    assertLockfileState(lockfilePath, pkg.packageName, version)
+    assertLocalPackageDependencyVersions(pkg.resolvedManifestPath, packageNames, version)
+  }
 
   return {
     mode: 'release',
-    packageName: options.packageName,
+    packageName,
     version
   }
 }
@@ -327,9 +498,10 @@ async function parseCliParameters(): Promise<CliParameters> {
   return Zod.strictObject({
     Ref: Zod.string().min(1).optional(),
     WorkspacePath: Zod.string().min(1),
-    ManifestPath: Zod.string().min(1),
+    ManifestPath: Zod.string().min(1).optional(),
     LockfilePath: Zod.string().min(1),
-    PackageName: Zod.string().min(1),
+    PackageName: Zod.string().min(1).optional(),
+    Packages: Zod.string().min(1).optional(),
     ReleasePublish: Zod.union([Zod.boolean(), Zod.string()]).optional()
   }).parse(parameters)
 }
@@ -342,6 +514,7 @@ async function main(): Promise<void> {
     manifestPath: parameters.ManifestPath,
     lockfilePath: parameters.LockfilePath,
     packageName: parameters.PackageName,
+    packages: parameters.Packages === undefined ? undefined : parsePackageSpecs(parameters.Packages),
     releasePublish: releasePublishEnabled(parameters.ReleasePublish)
   })
 

@@ -7,8 +7,9 @@ function/method calls, and evaluation limits must be reviewed as
 security-sensitive unless there is a clear reason they are not.
 
 Use root-relative paths in root-level documentation, scripts, issues, and pull
-request notes. For example, prefer `source/src/parser.rs` over `src/parser.rs`
-unless the text explicitly says the command is being run from `source/`.
+request notes. For example, prefer `parser/src/parser.rs` over `src/parser.rs`
+unless the text explicitly says the command is being run from a crate
+subdirectory.
 
 ## Repository Layout
 
@@ -18,10 +19,11 @@ be committed.
 
 | Path | Purpose | Change here when |
 | --- | --- | --- |
-| `source/` | Main Rust crate. | You are changing parser, AST, compiler, runtime, CLI, or public API behavior. |
-| `source/src/ast.rs` | Public AST model. | Syntax shape, serde AST, spans, or canonical representation changes. |
-| `source/src/parser.rs` and `source/src/lexer.rs` | Handwritten parser pipeline. | Tokens, grammar, precedence, diagnostics, or parse recovery change. |
-| `source/src/format.rs` | Canonical formatting. | Normalized expression output or idempotency changes. |
+| `parser/` | Parser Rust crate. | You are changing lexer, parser, AST, diagnostics, spans, or canonical formatting behavior. |
+| `parser/src/ast.rs` | Public AST model. | Syntax shape, serde AST, spans, or canonical representation changes. |
+| `parser/src/parser.rs` and `parser/src/lexer.rs` | Handwritten parser pipeline. | Tokens, grammar, precedence, diagnostics, or parse recovery change. |
+| `parser/src/format.rs` | Canonical formatting. | Normalized expression output or idempotency changes. |
+| `source/` | Umbrella Rust crate and CLI. | You are changing compile validation, runtime, CLI, public re-exports, or integration behavior. |
 | `source/src/compile.rs` | Compile-time validation. | Runtime schema checks, function arity checks, or validation policy changes. |
 | `source/src/runtime.rs` and `source/src/value.rs` | Evaluation and host integration. | Values, function/method/operator registry, limits, or evaluation semantics change. |
 | `source/src/bin/` | CLI tooling. | `online-dsl-forgectl` commands or command output changes. |
@@ -69,10 +71,12 @@ pnpm run test
 pnpm run versioning:check
 ```
 
-The committed `online-dsl-forge` Cargo version must remain `0.0.0` in
-`source/Cargo.toml` and `Cargo.lock`. Release CI derives the publish version
-from the triggering SemVer tag, rewrites the checkout for that workflow run, and
-publishes from the rewritten checkout.
+The committed Cargo version for `online-dsl-forge-parser` and
+`online-dsl-forge` must remain `0.0.0` in `parser/Cargo.toml`,
+`source/Cargo.toml`, and `Cargo.lock`. Release CI derives the publish version
+from the triggering SemVer tag, rewrites both crates in the checkout for that
+workflow run, publishes `online-dsl-forge-parser` first, and then publishes the
+umbrella `online-dsl-forge` crate.
 
 ## Commit Messages
 
@@ -111,9 +115,9 @@ new Rust module or source file under the most appropriate directory and wire it
 through `lib.rs` or the relevant binary as needed.
 
 Treat 750 lines as the review threshold for Rust source files under
-`source/src/`. Files above that threshold should be split into smaller
-responsibility-focused modules unless there is a documented reason to keep the
-implementation together.
+`parser/src/` and `source/src/`. Files above that threshold should be split into
+smaller responsibility-focused modules unless there is a documented reason to
+keep the implementation together.
 
 Keep module boundaries explicit:
 

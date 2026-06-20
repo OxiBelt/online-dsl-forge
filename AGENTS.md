@@ -15,10 +15,16 @@ input instead of reverse-proxy traffic.
 
 ## Repository Structure
 
+- `parser/`
+  - Rust crate for the lexer, parser, span-carrying AST, diagnostics, and
+    canonical formatter.
 - `source/`
-  - Main Rust crate for the parser, AST, compiler, evaluator, and CLI.
+  - Umbrella Rust crate for compile validation, runtime values, evaluator,
+    public re-exports, and CLI.
+- `parser/src/`
+  - Syntax-only parser library source code.
 - `source/src/`
-  - Core library source code.
+  - Umbrella library source code for compiler and runtime behavior.
 - `source/src/bin/`
   - CLI binaries.
 - `tests/rust/`

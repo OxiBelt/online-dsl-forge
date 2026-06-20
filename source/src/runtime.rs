@@ -3,9 +3,9 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::ast::{AstExpression, BinaryOp, ExprKind, UnaryOp};
+use online_dsl_forge_parser::{AstExpression, BinaryOp, ExprKind, SourceSpan, UnaryOp};
+
 use crate::compile::{CompiledExpression, RuntimeSchema};
-use crate::span::SourceSpan;
 use crate::value::Value;
 
 type FunctionHandler = Arc<dyn Fn(&[Value]) -> Result<Value, EvalError> + Send + Sync>;

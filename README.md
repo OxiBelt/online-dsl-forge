@@ -10,7 +10,8 @@ deterministic formatter, dynamic runtime registry, and CLI tooling.
 
 ## Capabilities
 
-- Handwritten lexer and recursive-descent expression parser.
+- Publishable `online-dsl-forge-parser` crate with a handwritten lexer,
+  recursive-descent expression parser, AST, diagnostics, spans, and formatter.
 - Stable span-carrying AST with `serde` serialization.
 - Deterministic canonical expression formatter.
 - Compile-time validation against host-provided runtime schemas.
@@ -53,8 +54,10 @@ cargo run --manifest-path source/Cargo.toml --bin online-dsl-forgectl -- \
 ## Project Layout
 
 ```text
-source/                       Rust library and CLI crate
-source/src/                   Parser, AST, compiler, runtime, and CLI support
+parser/                       Parser, AST, diagnostics, spans, and formatter crate
+source/                       Umbrella Rust library and CLI crate
+parser/src/                   Syntax-only parser library source
+source/src/                   Compiler, runtime, values, re-exports, and CLI support
 tests/rust/                   Repository-level Rust integration tests
 tests/scripts/                Local and CI check scripts
 docs/                         Specification and expression reference

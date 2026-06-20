@@ -5,14 +5,14 @@ and evaluating a small bounded DSL expression language in memory.
 
 The crate exists for host applications that need a canonical runtime and
 operator interface for DSL expressions without adopting a general-purpose
-scripting language. It uses a handwritten parser and exposes a stable AST,
-deterministic formatter, dynamic runtime registry, and CLI tooling.
+scripting language. It re-exports the publishable `online-dsl-forge-parser`
+syntax crate and exposes compile validation, a dynamic runtime registry, and
+CLI tooling.
 
 ## Capabilities
 
-- Handwritten lexer and recursive-descent expression parser.
-- Stable span-carrying AST with `serde` serialization.
-- Deterministic canonical expression formatter.
+- Re-exported handwritten lexer, recursive-descent expression parser,
+  span-carrying AST, diagnostics, and formatter from `online-dsl-forge-parser`.
 - Compile-time validation against host-provided runtime schemas.
 - Bounded in-memory evaluation with a dynamic variable, function, method, and
   operator registry.
