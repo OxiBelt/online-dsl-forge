@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use online_dsl_forge::{
-  CompileOptions, DynamicRegistry, EvalLimits, MapRuntime, RuntimeSchema, Value,
-  compile_expression, evaluate, format_expression, parse_expression,
+  Analyzer, BinaryOp, CapabilityMeta, CompileOptions, CostModel, DynamicRegistry, EvalLimits,
+  MapRuntime, RuntimeSchema, SecurityProfile, Value, compile_expression, evaluate,
+  evaluate_verified, format_expression, parse_expression,
 };
 
 #[test]
@@ -90,4 +91,99 @@ fn runtime_rejects_missing_verified_registry_capability() {
       .to_string()
       .contains("runtime registry is missing verified function len")
   );
+}
+
+#[test]
+fn runtime_rejects_missing_verified_method_registry_capability() {
+  let ast = parse_expression("name.starts_with(\"pi\")").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("name").add_method("starts_with", 1);
+  let compiled = compile_expression(&ast, &schema, CompileOptions::default())
+    .expect("expression should compile");
+  let mut variables = BTreeMap::new();
+  variables.insert("name".to_string(), Value::String("piquark".to_string()));
+  let runtime = MapRuntime::new(variables, DynamicRegistry::new());
+
+  let error = evaluate(&compiled, &runtime, EvalLimits::default())
+    .expect_err("missing registry method should fail closed");
+
+  assert!(
+    error
+      .to_string()
+      .contains("runtime registry is missing verified method starts_with")
+  );
+}
+
+#[test]
+fn runtime_rejects_verified_function_metadata_mismatch() {
+  let ast = parse_expression("len(items)").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("items")
+    .add_function_capability(CapabilityMeta::function("len", 1).with_cost(CostModel::Constant(2)));
+  let compiled = compile_expression(&ast, &schema, CompileOptions::default())
+    .expect("expression should compile");
+  let mut variables = BTreeMap::new();
+  variables.insert("items".to_string(), Value::Array(Vec::new()));
+  let runtime = MapRuntime::new(variables, online_dsl_forge::default_registry());
+
+  let error = evaluate(&compiled, &runtime, EvalLimits::default())
+    .expect_err("registry metadata mismatch should fail closed");
+
+  assert!(
+    error
+      .to_string()
+      .contains("runtime registry metadata for verified function len")
+  );
+}
+
+#[test]
+fn runtime_rejects_verified_operator_metadata_mismatch() {
+  let ast = parse_expression("left + right").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("left")
+    .add_variable("right")
+    .add_binary_operator_capability(
+      CapabilityMeta::binary_operator(BinaryOp::Add).with_cost(CostModel::Constant(2)),
+    );
+  let compiled = compile_expression(&ast, &schema, CompileOptions::default())
+    .expect("expression should compile");
+  let mut registry = DynamicRegistry::new();
+  registry.register_binary_operator(BinaryOp::Add, |left, right| match (left, right) {
+    (Value::Int(left), Value::Int(right)) => Ok(Value::Int(left + right)),
+    _ => Err(online_dsl_forge::EvalError::new(
+      "test add requires ints",
+      online_dsl_forge::SourceSpan::default(),
+    )),
+  });
+  let mut variables = BTreeMap::new();
+  variables.insert("left".to_string(), Value::Int(1));
+  variables.insert("right".to_string(), Value::Int(2));
+  let runtime = MapRuntime::new(variables, registry);
+
+  let error = evaluate(&compiled, &runtime, EvalLimits::default())
+    .expect_err("operator metadata mismatch should fail closed");
+
+  assert!(
+    error
+      .to_string()
+      .contains("runtime registry metadata for verified binary operator +")
+  );
+}
+
+#[test]
+fn evaluate_verified_accepts_analyzer_output() {
+  let ast = parse_expression("name.starts_with(\"pi\")").expect("expression should parse");
+  let mut variables = BTreeMap::new();
+  variables.insert("name".to_string(), Value::String("piquark".to_string()));
+  let runtime = MapRuntime::new(variables, online_dsl_forge::default_registry());
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &runtime.schema())
+    .expect("expression should analyze");
+
+  let value = evaluate_verified(&verified, &runtime, EvalLimits::default())
+    .expect("verified expression should evaluate");
+
+  assert_eq!(value, Value::Bool(true));
 }

@@ -1,6 +1,8 @@
+use online_dsl_forge::sema::RegexLiteral;
 use online_dsl_forge::{
   Analyzer, BodyAccess, CompileOptions, EvalLimits, MapRuntime, RuntimeSchema, SecurityProfile,
-  compile_expression, evaluate, format_expression, parse_expression,
+  VerifiedExprKindRef, VerifiedExpression, compile_expression, evaluate, format_expression,
+  parse_expression,
 };
 use serde_json::{Value as JsonValue, json};
 
@@ -10,6 +12,7 @@ const PARSE_DIAGNOSTICS: &str = include_str!("../golden/parse-diagnostics.json")
 const COMPILE_DIAGNOSTICS: &str = include_str!("../golden/compile-diagnostics.json");
 const SEMA_DIAGNOSTICS: &str = include_str!("../golden/sema-diagnostics.json");
 const EVALUATION: &str = include_str!("../golden/evaluation.json");
+const VERIFIED_IR: &str = include_str!("../golden/verified-ir.json");
 const RULEPACK_RENDER_DEFERRED: &str = include_str!("../golden/rulepack-render/deferred.json");
 const BODY_NEED_DEFERRED: &str = include_str!("../golden/body-need/deferred.json");
 
@@ -136,6 +139,41 @@ fn evaluation_matches_golden_fixtures() {
       }
       Err(error) => json!({ "error": error.to_string() }),
     };
+
+    assert_json_eq(id, &actual, required_value(&case, "expected"));
+  }
+}
+
+#[test]
+fn verified_ir_summary_matches_golden_fixtures() {
+  for case in fixture_cases(VERIFIED_IR) {
+    let id = case_id(&case);
+    let input = required_str(&case, "input");
+    let ast = parse_expression(input).unwrap_or_else(|error| {
+      panic!("{id}: expected expression to parse, got {error}");
+    });
+    let schema = sema_schema(required_value(&case, "schema"));
+    let profile = sema_profile(required_str(&case, "profile"));
+
+    let verified = Analyzer::new(profile)
+      .analyze(&ast, &schema)
+      .unwrap_or_else(|error| panic!("{id}: expected expression to analyze, got {error}"));
+    let actual = json!({
+      "profile": verified.profile().id,
+      "body_need": body_need_summary(verified.body_need()),
+      "static_cost_upper_bound": verified.static_cost_upper_bound(),
+      "regex_literals": verified.regex_literals().iter().map(regex_literal_summary).collect::<Vec<_>>(),
+      "required_capabilities": verified.required_capabilities().iter().map(|ticket| {
+        serde_json::to_value(ticket).expect("ticket should serialize")
+      }).collect::<Vec<_>>(),
+      "required_capability_metadata": verified.required_capability_metadata().iter().map(|(ticket, capability)| {
+        json!({
+          "ticket": serde_json::to_value(ticket).expect("ticket should serialize"),
+          "metadata": serde_json::to_value(capability).expect("capability should serialize"),
+        })
+      }).collect::<Vec<_>>(),
+      "root": verified_expr_summary(verified.root()),
+    });
 
     assert_json_eq(id, &actual, required_value(&case, "expected"));
   }
@@ -335,6 +373,28 @@ fn sema_schema(value: &JsonValue) -> RuntimeSchema {
     }
   }
 
+  if let Some(functions) = value.get("functions").and_then(JsonValue::as_object) {
+    for (name, arities) in functions {
+      for arity in arities
+        .as_array()
+        .expect("schema function arities must be arrays")
+      {
+        schema.add_function(name, json_usize(arity));
+      }
+    }
+  }
+
+  if let Some(methods) = value.get("methods").and_then(JsonValue::as_object) {
+    for (name, arities) in methods {
+      for arity in arities
+        .as_array()
+        .expect("schema method arities must be arrays")
+      {
+        schema.add_method(name, json_usize(arity));
+      }
+    }
+  }
+
   if let Some(functions) = value
     .get("expression_functions")
     .and_then(JsonValue::as_array)
@@ -390,6 +450,94 @@ fn body_access(value: &str) -> BodyAccess {
     "size_only" => BodyAccess::SizeOnly,
     "prefix_bytes" => BodyAccess::PrefixBytes,
     other => panic!("unknown body access {other}"),
+  }
+}
+
+fn body_need_summary(value: online_dsl_forge::BodyNeedSummary) -> JsonValue {
+  json!({
+    "request": body_access_name(value.request),
+    "response": body_access_name(value.response),
+    "stream": body_access_name(value.stream),
+  })
+}
+
+fn body_access_name(value: BodyAccess) -> &'static str {
+  match value {
+    BodyAccess::None => "none",
+    BodyAccess::SizeOnly => "size_only",
+    BodyAccess::PrefixBytes => "prefix_bytes",
+  }
+}
+
+fn regex_literal_summary(literal: &RegexLiteral) -> JsonValue {
+  json!({
+    "pattern": literal.pattern,
+    "flavor": literal.flavor,
+  })
+}
+
+fn verified_expr_summary(expression: &VerifiedExpression) -> JsonValue {
+  let capability = expression
+    .capability_ticket()
+    .map(|ticket| serde_json::to_value(ticket).expect("ticket should serialize"));
+  match expression.kind() {
+    VerifiedExprKindRef::Null => json!({ "kind": "null", "capability": capability }),
+    VerifiedExprKindRef::Bool(value) => {
+      json!({ "kind": "bool", "value": value, "capability": capability })
+    }
+    VerifiedExprKindRef::Int(value) => {
+      json!({ "kind": "int", "value": value, "capability": capability })
+    }
+    VerifiedExprKindRef::Float(value) => {
+      json!({ "kind": "float", "value": value, "capability": capability })
+    }
+    VerifiedExprKindRef::String(value) => {
+      json!({ "kind": "string", "value": value, "capability": capability })
+    }
+    VerifiedExprKindRef::Array(items) => json!({
+      "kind": "array",
+      "capability": capability,
+      "items": items.iter().map(verified_expr_summary).collect::<Vec<_>>(),
+    }),
+    VerifiedExprKindRef::Identifier(name) => {
+      json!({ "kind": "identifier", "name": name, "capability": capability })
+    }
+    VerifiedExprKindRef::Member { receiver, name } => json!({
+      "kind": "member",
+      "name": name,
+      "capability": capability,
+      "receiver": verified_expr_summary(receiver),
+    }),
+    VerifiedExprKindRef::FunctionCall { name, args } => json!({
+      "kind": "function_call",
+      "name": name,
+      "capability": capability,
+      "args": args.iter().map(verified_expr_summary).collect::<Vec<_>>(),
+    }),
+    VerifiedExprKindRef::MethodCall {
+      receiver,
+      name,
+      args,
+    } => json!({
+      "kind": "method_call",
+      "name": name,
+      "capability": capability,
+      "receiver": verified_expr_summary(receiver),
+      "args": args.iter().map(verified_expr_summary).collect::<Vec<_>>(),
+    }),
+    VerifiedExprKindRef::Unary { op, expr } => json!({
+      "kind": "unary",
+      "op": op,
+      "capability": capability,
+      "expr": verified_expr_summary(expr),
+    }),
+    VerifiedExprKindRef::Binary { left, op, right } => json!({
+      "kind": "binary",
+      "op": op,
+      "capability": capability,
+      "left": verified_expr_summary(left),
+      "right": verified_expr_summary(right),
+    }),
   }
 }
 

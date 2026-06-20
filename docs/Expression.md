@@ -39,6 +39,9 @@ name.starts_with("pi")
 
 Member access requires the runtime value to be an object. Function and method
 names are validated during compilation against the supplied runtime schema.
+Host functions, methods, and operator overrides may also be constrained by
+semantic capability metadata such as phase availability, body access, regex
+policy, cost, determinism, and side-effect freedom.
 
 ## Operators
 

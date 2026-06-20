@@ -143,6 +143,22 @@ impl CapabilityMeta {
     self
   }
 
+  pub fn with_receiver(mut self, receiver: TypeClass) -> Self {
+    self.receiver = Some(receiver);
+    self
+  }
+
+  pub fn with_args(mut self, args: impl IntoIterator<Item = TypeClass>) -> Self {
+    self.args = args.into_iter().collect();
+    self.arity = self.args.len();
+    self
+  }
+
+  pub fn with_result(mut self, result: TypeClass) -> Self {
+    self.result = result;
+    self
+  }
+
   pub fn with_body_access(mut self, access: BodyAccess) -> Self {
     self.body_access = access;
     self
@@ -158,8 +174,22 @@ impl CapabilityMeta {
     self
   }
 
+  pub fn with_deterministic(mut self, deterministic: bool) -> Self {
+    self.deterministic = deterministic;
+    self
+  }
+
+  pub fn with_side_effect_free(mut self, side_effect_free: bool) -> Self {
+    self.side_effect_free = side_effect_free;
+    self
+  }
+
   pub fn is_available_in(&self, phase: Phase) -> bool {
     self.phases.is_empty() || self.phases.contains(&phase)
+  }
+
+  pub fn ticket(&self) -> CapabilityTicket {
+    CapabilityTicket::new(self.kind, self.name.clone(), self.arity)
   }
 
   fn new(name: impl Into<String>, kind: CapabilityKind, arity: usize) -> Self {
@@ -513,6 +543,10 @@ impl RuntimeSchema {
     self.variables.contains_key(name)
   }
 
+  pub fn variables(&self) -> impl Iterator<Item = &VariableMeta> {
+    self.variables.values()
+  }
+
   pub fn variable(&self, name: &str) -> Option<&VariableMeta> {
     self.variables.get(name)
   }
@@ -537,6 +571,30 @@ impl RuntimeSchema {
       .methods
       .get(name)
       .and_then(|entries| entries.get(&arity))
+  }
+
+  pub fn unary_operator_capability(&self, op: UnaryOp) -> Option<&CapabilityMeta> {
+    self.unary_ops.get(op.as_str())
+  }
+
+  pub fn binary_operator_capability(&self, op: BinaryOp) -> Option<&CapabilityMeta> {
+    self.binary_ops.get(op.as_str())
+  }
+
+  pub fn function_capabilities(&self) -> impl Iterator<Item = &CapabilityMeta> {
+    self.functions.values().flat_map(BTreeMap::values)
+  }
+
+  pub fn method_capabilities(&self) -> impl Iterator<Item = &CapabilityMeta> {
+    self.methods.values().flat_map(BTreeMap::values)
+  }
+
+  pub fn unary_operator_capabilities(&self) -> impl Iterator<Item = &CapabilityMeta> {
+    self.unary_ops.values()
+  }
+
+  pub fn binary_operator_capabilities(&self) -> impl Iterator<Item = &CapabilityMeta> {
+    self.binary_ops.values()
   }
 
   pub fn body_access_for_path(&self, path: &[String]) -> Option<(BodyTarget, BodyAccess)> {

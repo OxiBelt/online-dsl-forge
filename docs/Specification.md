@@ -88,6 +88,24 @@ and security profile. Validation covers:
 - regex admission policy and literal regex precompilation for strict profiles
 - static AST node, call-depth, and cost limits
 
+### Capability Metadata
+
+Host functions, methods, and operator overrides are declared through capability
+metadata. Metadata includes the capability kind, name, arity, optional
+receiver/argument/result type classes, allowed phases, body-access need, regex
+argument positions, determinism, side-effect freedom, and static cost model.
+
+The semantic analyzer treats this metadata as part of validation, not as
+advisory documentation. Security profiles can reject capabilities that are not
+available in the active phase, require forbidden or dynamic regex arguments,
+exceed static cost budgets, read disallowed body content, are non-deterministic,
+or are not side-effect free.
+
+The current type-class fields are compatibility metadata for host/runtime
+contracts. They are preserved in verified programs and checked against runtime
+registry metadata, but they are not yet a full static type checker for arbitrary
+host object graphs.
+
 Expression functions are sema-only helpers. The default analysis scope admits
 local functions first and then global functions, matching route-local override
 behavior in OxiBelt-like hosts. Global function bodies resolve nested calls
@@ -100,6 +118,19 @@ returns a `CompiledExpression` backed by sema's verified program.
 Semantic analysis does not execute user code. It returns a verified program
 that can be evaluated repeatedly against compatible runtime contexts.
 
+### Verified IR Contract
+
+Verified programs carry the original AST, a semantically verified expression
+tree, the security profile used for analysis, static body need, static cost
+upper bound, admitted regex literals, precompiled regex cache, and the exact
+capability metadata snapshot required by the program.
+
+Function and method calls plus unary and binary operators carry capability
+tickets in the verified tree. Expression functions are expanded during semantic
+analysis and do not become runtime capabilities. A runtime context must provide
+registry metadata compatible with every verified capability ticket before
+evaluation begins.
+
 ## Runtime Evaluation
 
 Runtime evaluation receives a compiled expression or verified program, a
@@ -108,7 +139,10 @@ Runtime evaluation receives a compiled expression or verified program, a
 The runtime:
 
 - evaluates sema-verified IR rather than arbitrary parser AST
-- rejects runtime registries missing verified function or method capabilities
+- rejects runtime registries missing verified function, method, or operator
+  capabilities
+- rejects runtime registry metadata that does not match the verified capability
+  metadata snapshot
 - resolves identifiers from the context
 - dispatches functions, methods, and optional operator overrides through a
   dynamic registry

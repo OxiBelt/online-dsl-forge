@@ -1,7 +1,7 @@
 use online_dsl_forge::parse_expression;
 use online_dsl_forge::sema::{
-  Analyzer, BodyAccess, CapabilityMeta, ExpressionFunctionScope, Phase, RegexFlavor, RuntimeSchema,
-  SecurityProfile,
+  Analyzer, BodyAccess, CapabilityKind, CapabilityMeta, CapabilityTicket, CostModel,
+  ExpressionFunctionScope, Phase, RegexFlavor, RuntimeSchema, SecurityProfile, VerifiedExprKindRef,
 };
 
 #[test]
@@ -16,7 +16,172 @@ fn sema_compiles_to_verified_program() {
 
   assert_eq!(verified.ast(), &ast);
   assert_eq!(verified.body_need().request, BodyAccess::None);
-  assert!(verified.required_capabilities().is_empty());
+  assert!(
+    verified
+      .required_capabilities()
+      .contains(&CapabilityTicket::new(CapabilityKind::BinaryOp, "+", 2))
+  );
+  assert!(
+    verified
+      .required_capabilities()
+      .contains(&CapabilityTicket::new(CapabilityKind::BinaryOp, ">=", 2))
+  );
+}
+
+#[test]
+fn required_capabilities_are_exact_and_deduplicated() {
+  let ast = parse_expression("[len(items), len(items), name.starts_with(\"pi\")]")
+    .expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("items")
+    .add_variable("name")
+    .add_function("len", 1)
+    .add_method("starts_with", 1);
+
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect("expression should analyze");
+
+  let expected = [
+    CapabilityTicket::new(CapabilityKind::Function, "len", 1),
+    CapabilityTicket::new(CapabilityKind::Method, "starts_with", 1),
+  ]
+  .into_iter()
+  .collect();
+  assert_eq!(verified.required_capabilities(), &expected);
+  assert_eq!(verified.required_capability_metadata().len(), 2);
+}
+
+#[test]
+fn expression_functions_inline_verified_ir_without_helper_ticket() {
+  let ast = parse_expression("is_small(items)").expect("expression should parse");
+  let function = parse_expression("len(items) < 3").expect("function should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("items")
+    .add_function("len", 1)
+    .add_expression_function("is_small", ["items"], function);
+
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect("expression should analyze");
+
+  assert!(matches!(
+    verified.root().kind(),
+    VerifiedExprKindRef::Binary { .. }
+  ));
+  assert!(
+    !verified
+      .required_capabilities()
+      .contains(&CapabilityTicket::new(
+        CapabilityKind::Function,
+        "is_small",
+        1
+      ))
+  );
+  assert!(
+    verified
+      .required_capabilities()
+      .contains(&CapabilityTicket::new(CapabilityKind::Function, "len", 1))
+  );
+}
+
+#[test]
+fn capability_phase_metadata_rejects_unavailable_calls() {
+  let ast =
+    parse_expression("[response_only(), name.response_only()]").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("name")
+    .add_function_capability(
+      CapabilityMeta::function("response_only", 0).with_phases([Phase::Response]),
+    )
+    .add_method_capability(
+      CapabilityMeta::method("response_only", 0).with_phases([Phase::Response]),
+    );
+
+  let error = Analyzer::new(SecurityProfile::waf_request())
+    .analyze(&ast, &schema)
+    .expect_err("request profile should reject response-only capabilities");
+  let message = error.to_string();
+
+  assert!(message.contains("function response_only is unavailable in Request phase"));
+  assert!(message.contains("method response_only is unavailable in Request phase"));
+}
+
+#[test]
+fn capability_body_access_metadata_drives_body_need() {
+  let ast = parse_expression("Request.Body.inspect()").expect("expression should parse");
+  let mut schema = RuntimeSchema::waf();
+  schema.add_method_capability(
+    CapabilityMeta::method("inspect", 0).with_body_access(BodyAccess::PrefixBytes),
+  );
+
+  let verified = Analyzer::new(SecurityProfile::waf_request())
+    .analyze(&ast, &schema)
+    .expect("expression should analyze");
+
+  assert_eq!(verified.body_need().request, BodyAccess::PrefixBytes);
+}
+
+#[test]
+fn capability_cost_metadata_contributes_to_static_cost_limit() {
+  let ast = parse_expression("expensive()").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_function_capability(
+    CapabilityMeta::function("expensive", 0).with_cost(CostModel::Constant(10)),
+  );
+  let mut profile = SecurityProfile::generic_safe();
+  profile.max_cost_units = 2;
+
+  let error = Analyzer::new(profile)
+    .analyze(&ast, &schema)
+    .expect_err("expensive capability should exceed static cost limit");
+
+  assert!(error.to_string().contains("static cost limit exceeded"));
+}
+
+#[test]
+fn deterministic_profile_rejects_unsafe_capability_metadata() {
+  let ast = parse_expression("[random(), mutate()]").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_function_capability(CapabilityMeta::function("random", 0).with_deterministic(false))
+    .add_function_capability(CapabilityMeta::function("mutate", 0).with_side_effect_free(false));
+
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect_err("generic safe profile should reject unsafe capability metadata");
+  let message = error.to_string();
+
+  assert!(message.contains("function random is non-deterministic"));
+  assert!(message.contains("function mutate has side effects"));
+}
+
+#[test]
+fn operator_capabilities_are_verified_and_snapshot() {
+  let ast = parse_expression("!enabled || score + 1 >= 10").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("enabled").add_variable("score");
+
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect("expression should analyze");
+
+  for (name, kind, arity) in [
+    ("!", CapabilityKind::UnaryOp, 1),
+    ("||", CapabilityKind::BinaryOp, 2),
+    ("+", CapabilityKind::BinaryOp, 2),
+    (">=", CapabilityKind::BinaryOp, 2),
+  ] {
+    let ticket = CapabilityTicket::new(kind, name, arity);
+    assert!(verified.required_capabilities().contains(&ticket));
+    assert_eq!(
+      verified.required_capability_metadata()[&ticket].ticket(),
+      ticket
+    );
+  }
 }
 
 #[test]

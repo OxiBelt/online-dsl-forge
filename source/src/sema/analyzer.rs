@@ -3,17 +3,18 @@ mod functions;
 mod phase;
 mod support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::parser::{
   AstExpression, BinaryOp, Diagnostic, DiagnosticReport, ExprKind, SourceSpan, UnaryOp,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::sema::profile::{BodyNeedSummary, RegexPolicy, SecurityProfile, SecurityProfileId};
+use crate::sema::profile::{
+  BodyNeedSummary, Determinism, RegexPolicy, SecurityProfile, SecurityProfileId,
+};
 use crate::sema::schema::{
-  CapabilityKind, CapabilityMeta, CapabilityTicket, ExpressionFunctionScope, RuntimeSchema,
-  SignatureMatch,
+  CapabilityMeta, CapabilityTicket, ExpressionFunctionScope, RuntimeSchema, SignatureMatch,
 };
 use crate::sema::verified::{
   CompiledExpression, CompiledRegexCache, RegexLiteral, VerifiedExprKind, VerifiedExpression,
@@ -74,6 +75,7 @@ impl Analyzer {
         regex_literals: state.regex_literals,
         regex_cache: state.regex_cache,
         required_capabilities: state.required_capabilities,
+        required_capability_metadata: state.required_capability_metadata,
       }))
     } else {
       Err(DiagnosticReport::new(state.diagnostics))
@@ -99,6 +101,7 @@ struct AnalyzeState<'a> {
   regex_literals: Vec<RegexLiteral>,
   regex_cache: CompiledRegexCache,
   required_capabilities: BTreeSet<CapabilityTicket>,
+  required_capability_metadata: BTreeMap<CapabilityTicket, CapabilityMeta>,
   active_functions: Vec<(ExpressionFunctionScope, String)>,
 }
 
@@ -111,6 +114,7 @@ impl<'a> AnalyzeState<'a> {
       regex_literals: Vec::new(),
       regex_cache: CompiledRegexCache::default(),
       required_capabilities: BTreeSet::new(),
+      required_capability_metadata: BTreeMap::new(),
       active_functions: Vec::new(),
     }
   }
@@ -299,21 +303,21 @@ impl<'a> AnalyzeState<'a> {
     );
     let args_analysis = self.analyze_args(args, depth);
     if let Some(capability) = capability {
-      self.validate_capability_phase(capability, span);
+      self.validate_capability(capability, span);
       self.validate_regex_args(capability, args, span);
-      self.required_capabilities.insert(CapabilityTicket::new(
-        CapabilityKind::Function,
-        name,
-        args.len(),
-      ));
+      self.require_capability(capability);
     }
+    let capability_ticket = capability.map(CapabilityMeta::ticket);
     ExprAnalysis::new(
-      VerifiedExpression::new(
-        VerifiedExprKind::FunctionCall {
-          name: name.to_string(),
-          args: args_analysis.exprs,
-        },
-        span,
+      verified_with_capability(
+        VerifiedExpression::new(
+          VerifiedExprKind::FunctionCall {
+            name: name.to_string(),
+            args: args_analysis.exprs,
+          },
+          span,
+        ),
+        capability_ticket,
       ),
       None,
       None,
@@ -345,24 +349,24 @@ impl<'a> AnalyzeState<'a> {
     let mut body_need = receiver.body_need.merge(args_analysis.body_need);
     let mitigation_payload = receiver.mitigation_payload || args_analysis.mitigation_payload;
     if let Some(capability) = capability {
-      self.validate_capability_phase(capability, span);
+      self.validate_capability(capability, span);
       self.validate_regex_args(capability, args, span);
       self.merge_body_access_for_method(&mut body_need, receiver.origin, capability);
-      self.required_capabilities.insert(CapabilityTicket::new(
-        CapabilityKind::Method,
-        name,
-        args.len(),
-      ));
+      self.require_capability(capability);
     }
+    let capability_ticket = capability.map(CapabilityMeta::ticket);
 
     ExprAnalysis::new(
-      VerifiedExpression::new(
-        VerifiedExprKind::MethodCall {
-          receiver: Box::new(receiver.expr),
-          name: name.to_string(),
-          args: args_analysis.exprs,
-        },
-        span,
+      verified_with_capability(
+        VerifiedExpression::new(
+          VerifiedExprKind::MethodCall {
+            receiver: Box::new(receiver.expr),
+            name: name.to_string(),
+            args: args_analysis.exprs,
+          },
+          span,
+        ),
+        capability_ticket,
       ),
       None,
       None,
@@ -383,6 +387,14 @@ impl<'a> AnalyzeState<'a> {
     depth: usize,
   ) -> ExprAnalysis {
     let expr = self.analyze_expression(expr, depth + 1);
+    let capability = self
+      .schema
+      .unary_operator_capability(op)
+      .cloned()
+      .unwrap_or_else(|| CapabilityMeta::unary_operator(op));
+    self.validate_capability(&capability, span);
+    self.require_capability(&capability);
+    let ticket = capability.ticket();
     ExprAnalysis::new(
       VerifiedExpression::new(
         VerifiedExprKind::Unary {
@@ -390,12 +402,13 @@ impl<'a> AnalyzeState<'a> {
           expr: Box::new(expr.expr),
         },
         span,
-      ),
+      )
+      .with_capability_ticket(ticket),
       None,
       None,
       expr.body_need,
       expr.nodes + 1,
-      expr.cost + 1,
+      expr.cost + capability.cost.static_cost(),
     )
     .with_mitigation_payload(expr.mitigation_payload)
   }
@@ -410,6 +423,14 @@ impl<'a> AnalyzeState<'a> {
   ) -> ExprAnalysis {
     let left = self.analyze_expression(left, depth + 1);
     let right = self.analyze_expression(right, depth + 1);
+    let capability = self
+      .schema
+      .binary_operator_capability(op)
+      .cloned()
+      .unwrap_or_else(|| CapabilityMeta::binary_operator(op));
+    self.validate_capability(&capability, span);
+    self.require_capability(&capability);
+    let ticket = capability.ticket();
     ExprAnalysis::new(
       VerifiedExpression::new(
         VerifiedExprKind::Binary {
@@ -418,12 +439,13 @@ impl<'a> AnalyzeState<'a> {
           right: Box::new(right.expr),
         },
         span,
-      ),
+      )
+      .with_capability_ticket(ticket),
       None,
       None,
       left.body_need.merge(right.body_need),
       left.nodes + right.nodes + 1,
-      left.cost + right.cost + 1,
+      left.cost + right.cost + capability.cost.static_cost(),
     )
     .with_mitigation_payload(left.mitigation_payload || right.mitigation_payload)
   }
@@ -538,5 +560,50 @@ impl<'a> AnalyzeState<'a> {
         }
       }
     }
+  }
+
+  fn validate_capability(&mut self, capability: &CapabilityMeta, span: SourceSpan) {
+    self.validate_capability_phase(capability, span);
+    if matches!(self.analyzer.profile.determinism, Determinism::Required) {
+      if !capability.deterministic {
+        self.diagnostics.push(Diagnostic::new(
+          format!(
+            "{} {} is non-deterministic but profile requires determinism",
+            support::capability_kind_label(capability.kind),
+            capability.name
+          ),
+          span,
+        ));
+      }
+      if !capability.side_effect_free {
+        self.diagnostics.push(Diagnostic::new(
+          format!(
+            "{} {} has side effects but profile requires side-effect-free capabilities",
+            support::capability_kind_label(capability.kind),
+            capability.name
+          ),
+          span,
+        ));
+      }
+    }
+  }
+
+  fn require_capability(&mut self, capability: &CapabilityMeta) {
+    let ticket = capability.ticket();
+    self.required_capabilities.insert(ticket.clone());
+    self
+      .required_capability_metadata
+      .insert(ticket, capability.clone());
+  }
+}
+
+fn verified_with_capability(
+  expression: VerifiedExpression,
+  ticket: Option<CapabilityTicket>,
+) -> VerifiedExpression {
+  if let Some(ticket) = ticket {
+    expression.with_capability_ticket(ticket)
+  } else {
+    expression
   }
 }

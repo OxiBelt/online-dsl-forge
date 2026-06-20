@@ -4,7 +4,7 @@ use crate::parser::{AstExpression, BinaryOp, SourceSpan, UnaryOp};
 use regex::{Regex, RegexBuilder};
 
 use crate::sema::profile::{BodyNeedSummary, SecurityProfile};
-use crate::sema::schema::{CapabilityTicket, RegexFlavor};
+use crate::sema::schema::{CapabilityMeta, CapabilityTicket, RegexFlavor};
 
 #[derive(Debug, Clone)]
 pub struct VerifiedProgram {
@@ -16,6 +16,7 @@ pub struct VerifiedProgram {
   regex_literals: Vec<RegexLiteral>,
   regex_cache: CompiledRegexCache,
   required_capabilities: BTreeSet<CapabilityTicket>,
+  required_capability_metadata: BTreeMap<CapabilityTicket, CapabilityMeta>,
 }
 
 impl VerifiedProgram {
@@ -29,6 +30,7 @@ impl VerifiedProgram {
       regex_literals: parts.regex_literals,
       regex_cache: parts.regex_cache,
       required_capabilities: parts.required_capabilities,
+      required_capability_metadata: parts.required_capability_metadata,
     }
   }
 
@@ -63,6 +65,10 @@ impl VerifiedProgram {
   pub fn required_capabilities(&self) -> &BTreeSet<CapabilityTicket> {
     &self.required_capabilities
   }
+
+  pub fn required_capability_metadata(&self) -> &BTreeMap<CapabilityTicket, CapabilityMeta> {
+    &self.required_capability_metadata
+  }
 }
 
 pub(crate) struct VerifiedProgramParts {
@@ -74,6 +80,7 @@ pub(crate) struct VerifiedProgramParts {
   pub regex_literals: Vec<RegexLiteral>,
   pub regex_cache: CompiledRegexCache,
   pub required_capabilities: BTreeSet<CapabilityTicket>,
+  pub required_capability_metadata: BTreeMap<CapabilityTicket, CapabilityMeta>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,15 +114,29 @@ impl CompiledExpression {
 pub struct VerifiedExpression {
   kind: VerifiedExprKind,
   span: SourceSpan,
+  capability_ticket: Option<CapabilityTicket>,
 }
 
 impl VerifiedExpression {
   pub(crate) fn new(kind: VerifiedExprKind, span: SourceSpan) -> Self {
-    Self { kind, span }
+    Self {
+      kind,
+      span,
+      capability_ticket: None,
+    }
+  }
+
+  pub(crate) fn with_capability_ticket(mut self, ticket: CapabilityTicket) -> Self {
+    self.capability_ticket = Some(ticket);
+    self
   }
 
   pub fn span(&self) -> SourceSpan {
     self.span
+  }
+
+  pub fn capability_ticket(&self) -> Option<&CapabilityTicket> {
+    self.capability_ticket.as_ref()
   }
 
   pub fn kind(&self) -> VerifiedExprKindRef<'_> {

@@ -1,0 +1,309 @@
+[
+  {
+    "id": "generic_capability_summary",
+    "input": "[len(items), name.starts_with(\"pi\"), score + 1 >= 10]",
+    "schema": {
+      "variables": ["items", "name", "score"],
+      "functions": {
+        "len": [1]
+      },
+      "methods": {
+        "starts_with": [1]
+      }
+    },
+    "profile": "generic_safe",
+    "expected": {
+      "profile": "generic_safe",
+      "body_need": {
+        "request": "none",
+        "response": "none",
+        "stream": "none"
+      },
+      "static_cost_upper_bound": 11,
+      "regex_literals": [],
+      "required_capabilities": [
+        {
+          "kind": "function",
+          "name": "len",
+          "arity": 1
+        },
+        {
+          "kind": "method",
+          "name": "starts_with",
+          "arity": 1
+        },
+        {
+          "kind": "binary_op",
+          "name": "+",
+          "arity": 2
+        },
+        {
+          "kind": "binary_op",
+          "name": ">=",
+          "arity": 2
+        }
+      ],
+      "required_capability_metadata": [
+        {
+          "ticket": {
+            "kind": "function",
+            "name": "len",
+            "arity": 1
+          },
+          "metadata": {
+            "name": "len",
+            "kind": "function",
+            "arity": 1,
+            "receiver": null,
+            "args": ["dyn"],
+            "result": "dyn",
+            "phases": [],
+            "body_access": "none",
+            "regex_args": [],
+            "deterministic": true,
+            "side_effect_free": true,
+            "cost": {
+              "constant": 1
+            }
+          }
+        },
+        {
+          "ticket": {
+            "kind": "method",
+            "name": "starts_with",
+            "arity": 1
+          },
+          "metadata": {
+            "name": "starts_with",
+            "kind": "method",
+            "arity": 1,
+            "receiver": null,
+            "args": ["dyn"],
+            "result": "dyn",
+            "phases": [],
+            "body_access": "none",
+            "regex_args": [],
+            "deterministic": true,
+            "side_effect_free": true,
+            "cost": {
+              "constant": 1
+            }
+          }
+        },
+        {
+          "ticket": {
+            "kind": "binary_op",
+            "name": "+",
+            "arity": 2
+          },
+          "metadata": {
+            "name": "+",
+            "kind": "binary_op",
+            "arity": 2,
+            "receiver": null,
+            "args": ["dyn", "dyn"],
+            "result": "dyn",
+            "phases": [],
+            "body_access": "none",
+            "regex_args": [],
+            "deterministic": true,
+            "side_effect_free": true,
+            "cost": {
+              "constant": 1
+            }
+          }
+        },
+        {
+          "ticket": {
+            "kind": "binary_op",
+            "name": ">=",
+            "arity": 2
+          },
+          "metadata": {
+            "name": ">=",
+            "kind": "binary_op",
+            "arity": 2,
+            "receiver": null,
+            "args": ["dyn", "dyn"],
+            "result": "dyn",
+            "phases": [],
+            "body_access": "none",
+            "regex_args": [],
+            "deterministic": true,
+            "side_effect_free": true,
+            "cost": {
+              "constant": 1
+            }
+          }
+        }
+      ],
+      "root": {
+        "kind": "array",
+        "capability": null,
+        "items": [
+          {
+            "kind": "function_call",
+            "name": "len",
+            "capability": {
+              "kind": "function",
+              "name": "len",
+              "arity": 1
+            },
+            "args": [
+              {
+                "kind": "identifier",
+                "name": "items",
+                "capability": null
+              }
+            ]
+          },
+          {
+            "kind": "method_call",
+            "name": "starts_with",
+            "capability": {
+              "kind": "method",
+              "name": "starts_with",
+              "arity": 1
+            },
+            "receiver": {
+              "kind": "identifier",
+              "name": "name",
+              "capability": null
+            },
+            "args": [
+              {
+                "kind": "string",
+                "value": "pi",
+                "capability": null
+              }
+            ]
+          },
+          {
+            "kind": "binary",
+            "op": "ge",
+            "capability": {
+              "kind": "binary_op",
+              "name": ">=",
+              "arity": 2
+            },
+            "left": {
+              "kind": "binary",
+              "op": "add",
+              "capability": {
+                "kind": "binary_op",
+                "name": "+",
+                "arity": 2
+              },
+              "left": {
+                "kind": "identifier",
+                "name": "score",
+                "capability": null
+              },
+              "right": {
+                "kind": "int",
+                "value": 1,
+                "capability": null
+              }
+            },
+            "right": {
+              "kind": "int",
+              "value": 10,
+              "capability": null
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "waf_regex_body_summary",
+    "input": "Request.Body.Text.matches(\"secret\")",
+    "schema": {
+      "preset": "waf"
+    },
+    "profile": "waf_request",
+    "expected": {
+      "profile": "waf_request",
+      "body_need": {
+        "request": "prefix_bytes",
+        "response": "none",
+        "stream": "none"
+      },
+      "static_cost_upper_bound": 5,
+      "regex_literals": [
+        {
+          "pattern": "secret",
+          "flavor": "default"
+        }
+      ],
+      "required_capabilities": [
+        {
+          "kind": "method",
+          "name": "matches",
+          "arity": 1
+        }
+      ],
+      "required_capability_metadata": [
+        {
+          "ticket": {
+            "kind": "method",
+            "name": "matches",
+            "arity": 1
+          },
+          "metadata": {
+            "name": "matches",
+            "kind": "method",
+            "arity": 1,
+            "receiver": null,
+            "args": ["dyn"],
+            "result": "dyn",
+            "phases": [],
+            "body_access": "prefix_bytes",
+            "regex_args": [
+              {
+                "index": 0,
+                "flavor": "default"
+              }
+            ],
+            "deterministic": true,
+            "side_effect_free": true,
+            "cost": {
+              "constant": 1
+            }
+          }
+        }
+      ],
+      "root": {
+        "kind": "method_call",
+        "name": "matches",
+        "capability": {
+          "kind": "method",
+          "name": "matches",
+          "arity": 1
+        },
+        "receiver": {
+          "kind": "member",
+          "name": "Text",
+          "capability": null,
+          "receiver": {
+            "kind": "member",
+            "name": "Body",
+            "capability": null,
+            "receiver": {
+              "kind": "identifier",
+              "name": "Request",
+              "capability": null
+            }
+          }
+        },
+        "args": [
+          {
+            "kind": "string",
+            "value": "secret",
+            "capability": null
+          }
+        ]
+      }
+    }
+  }
+]

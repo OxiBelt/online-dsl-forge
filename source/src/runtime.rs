@@ -1,4 +1,5 @@
 mod capability_check;
+mod defaults;
 
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
@@ -13,6 +14,7 @@ use crate::compile::{
 };
 use crate::value::Value;
 use capability_check::verify_runtime_capabilities;
+pub use defaults::default_registry;
 
 type FunctionHandler = Arc<dyn Fn(&[Value]) -> Result<Value, EvalError> + Send + Sync>;
 type MethodHandler = Arc<dyn Fn(&Value, &[Value]) -> Result<Value, EvalError> + Send + Sync>;
@@ -69,8 +71,8 @@ impl Default for EvalLimits {
 pub struct DynamicRegistry {
   functions: BTreeMap<String, Vec<FunctionEntry>>,
   methods: BTreeMap<String, Vec<MethodEntry>>,
-  unary_ops: HashMap<UnaryOp, UnaryHandler>,
-  binary_ops: HashMap<BinaryOp, BinaryHandler>,
+  unary_ops: HashMap<UnaryOp, UnaryEntry>,
+  binary_ops: HashMap<BinaryOp, BinaryEntry>,
 }
 
 #[derive(Clone)]
@@ -85,6 +87,18 @@ struct MethodEntry {
   arity: usize,
   capability: CapabilityMeta,
   handler: MethodHandler,
+}
+
+#[derive(Clone)]
+struct UnaryEntry {
+  capability: CapabilityMeta,
+  handler: UnaryHandler,
+}
+
+#[derive(Clone)]
+struct BinaryEntry {
+  capability: CapabilityMeta,
+  handler: BinaryHandler,
 }
 
 impl DynamicRegistry {
@@ -149,7 +163,23 @@ impl DynamicRegistry {
     op: UnaryOp,
     handler: impl Fn(Value) -> Result<Value, EvalError> + Send + Sync + 'static,
   ) -> &mut Self {
-    self.unary_ops.insert(op, Arc::new(handler));
+    self.register_unary_operator_capability(CapabilityMeta::unary_operator(op), handler)
+  }
+
+  pub fn register_unary_operator_capability(
+    &mut self,
+    capability: CapabilityMeta,
+    handler: impl Fn(Value) -> Result<Value, EvalError> + Send + Sync + 'static,
+  ) -> &mut Self {
+    if let Some(op) = unary_op_from_name(&capability.name) {
+      self.unary_ops.insert(
+        op,
+        UnaryEntry {
+          capability,
+          handler: Arc::new(handler),
+        },
+      );
+    }
     self
   }
 
@@ -158,7 +188,23 @@ impl DynamicRegistry {
     op: BinaryOp,
     handler: impl Fn(Value, Value) -> Result<Value, EvalError> + Send + Sync + 'static,
   ) -> &mut Self {
-    self.binary_ops.insert(op, Arc::new(handler));
+    self.register_binary_operator_capability(CapabilityMeta::binary_operator(op), handler)
+  }
+
+  pub fn register_binary_operator_capability(
+    &mut self,
+    capability: CapabilityMeta,
+    handler: impl Fn(Value, Value) -> Result<Value, EvalError> + Send + Sync + 'static,
+  ) -> &mut Self {
+    if let Some(op) = binary_op_from_name(&capability.name) {
+      self.binary_ops.insert(
+        op,
+        BinaryEntry {
+          capability,
+          handler: Arc::new(handler),
+        },
+      );
+    }
     self
   }
 
@@ -174,20 +220,43 @@ impl DynamicRegistry {
         schema.add_method_capability(entry.capability.clone());
       }
     }
+    for entry in self.unary_ops.values() {
+      schema.add_unary_operator_capability(entry.capability.clone());
+    }
+    for entry in self.binary_ops.values() {
+      schema.add_binary_operator_capability(entry.capability.clone());
+    }
     schema
   }
 
-  fn has_capability_ticket(&self, ticket: &CapabilityTicket) -> bool {
+  fn capability_for_ticket(&self, ticket: &CapabilityTicket) -> Option<CapabilityMeta> {
     match ticket.kind {
       CapabilityKind::Function => self
         .functions
         .get(&ticket.name)
-        .is_some_and(|entries| entries.iter().any(|entry| entry.arity == ticket.arity)),
+        .and_then(|entries| entries.iter().find(|entry| entry.arity == ticket.arity))
+        .map(|entry| entry.capability.clone()),
       CapabilityKind::Method => self
         .methods
         .get(&ticket.name)
-        .is_some_and(|entries| entries.iter().any(|entry| entry.arity == ticket.arity)),
-      CapabilityKind::UnaryOp | CapabilityKind::BinaryOp => true,
+        .and_then(|entries| entries.iter().find(|entry| entry.arity == ticket.arity))
+        .map(|entry| entry.capability.clone()),
+      CapabilityKind::UnaryOp => {
+        let op = unary_op_from_name(&ticket.name)?;
+        self
+          .unary_ops
+          .get(&op)
+          .map(|entry| entry.capability.clone())
+          .or_else(|| Some(CapabilityMeta::unary_operator(op)))
+      }
+      CapabilityKind::BinaryOp => {
+        let op = binary_op_from_name(&ticket.name)?;
+        self
+          .binary_ops
+          .get(&op)
+          .map(|entry| entry.capability.clone())
+          .or_else(|| Some(CapabilityMeta::binary_operator(op)))
+      }
     }
   }
 
@@ -413,8 +482,8 @@ impl EvalState {
     registry: &DynamicRegistry,
     span: SourceSpan,
   ) -> Result<Value, EvalError> {
-    if let Some(handler) = registry.unary_ops.get(&op) {
-      return handler(value).map_err(|error| EvalError { span, ..error });
+    if let Some(entry) = registry.unary_ops.get(&op) {
+      return (entry.handler)(value).map_err(|error| EvalError { span, ..error });
     }
     match (op, value) {
       (UnaryOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
@@ -463,8 +532,9 @@ impl EvalState {
       }
       _ => {
         let right_value = self.eval(right, context, depth + 1)?;
-        if let Some(handler) = context.registry().binary_ops.get(&op) {
-          return handler(left_value, right_value).map_err(|error| EvalError { span, ..error });
+        if let Some(entry) = context.registry().binary_ops.get(&op) {
+          return (entry.handler)(left_value, right_value)
+            .map_err(|error| EvalError { span, ..error });
         }
         self.eval_builtin_binary(left_value, op, right_value, span)
       }
@@ -639,107 +709,29 @@ fn type_error(op: &str, left: &Value, right: &Value, span: SourceSpan) -> EvalEr
   )
 }
 
-pub fn default_registry() -> DynamicRegistry {
-  let mut registry = DynamicRegistry::new();
-  registry.register_function("len", 1, |args| value_len(&args[0]));
-  registry.register_method("len", 0, |receiver, _| value_len(receiver));
-  registry.register_method("contains", 1, contains_value);
-  registry.register_method("contains_key", 1, contains_key);
-  registry.register_method("starts_with", 1, string_method("starts_with"));
-  registry.register_method("ends_with", 1, string_method("ends_with"));
-  registry.register_method("lower_ascii", 0, |receiver, _| match receiver {
-    Value::String(value) => Ok(Value::String(value.to_ascii_lowercase())),
-    other => Err(EvalError::new(
-      format!("lower_ascii requires string, got {}", other.type_name()),
-      SourceSpan::default(),
-    )),
-  });
-  registry.register_method("upper_ascii", 0, |receiver, _| match receiver {
-    Value::String(value) => Ok(Value::String(value.to_ascii_uppercase())),
-    other => Err(EvalError::new(
-      format!("upper_ascii requires string, got {}", other.type_name()),
-      SourceSpan::default(),
-    )),
-  });
-  registry
-}
-
-fn value_len(value: &Value) -> Result<Value, EvalError> {
-  let len = match value {
-    Value::String(value) => value.len(),
-    Value::Array(value) => value.len(),
-    Value::Object(value) => value.len(),
-    other => {
-      return Err(EvalError::new(
-        format!(
-          "len requires string, array, or object, got {}",
-          other.type_name()
-        ),
-        SourceSpan::default(),
-      ));
-    }
-  };
-  i64::try_from(len)
-    .map(Value::Int)
-    .map_err(|_| EvalError::new("length does not fit in i64", SourceSpan::default()))
-}
-
-fn contains_value(receiver: &Value, args: &[Value]) -> Result<Value, EvalError> {
-  match (receiver, &args[0]) {
-    (Value::String(receiver), Value::String(needle)) => Ok(Value::Bool(receiver.contains(needle))),
-    (Value::Array(items), needle) => Ok(Value::Bool(items.iter().any(|item| item == needle))),
-    (other, _) => Err(EvalError::new(
-      format!(
-        "contains requires string or array, got {}",
-        other.type_name()
-      ),
-      SourceSpan::default(),
-    )),
+fn unary_op_from_name(name: &str) -> Option<UnaryOp> {
+  match name {
+    "!" => Some(UnaryOp::Not),
+    "-" => Some(UnaryOp::Neg),
+    _ => None,
   }
 }
 
-fn contains_key(receiver: &Value, args: &[Value]) -> Result<Value, EvalError> {
-  match (receiver, &args[0]) {
-    (Value::Object(values), Value::String(key)) => Ok(Value::Bool(values.contains_key(key))),
-    (Value::Object(_), other) => Err(EvalError::new(
-      format!(
-        "contains_key requires string key, got {}",
-        other.type_name()
-      ),
-      SourceSpan::default(),
-    )),
-    (other, _) => Err(EvalError::new(
-      format!("contains_key requires object, got {}", other.type_name()),
-      SourceSpan::default(),
-    )),
-  }
-}
-
-fn string_method(
-  method: &'static str,
-) -> impl Fn(&Value, &[Value]) -> Result<Value, EvalError> + Send + Sync + 'static {
-  move |receiver, args| match (receiver, &args[0]) {
-    (Value::String(receiver), Value::String(arg)) => {
-      let value = match method {
-        "starts_with" => receiver.starts_with(arg),
-        "ends_with" => receiver.ends_with(arg),
-        _ => false,
-      };
-      Ok(Value::Bool(value))
-    }
-    (Value::String(_), other) => Err(EvalError::new(
-      format!(
-        "{method} requires string argument, got {}",
-        other.type_name()
-      ),
-      SourceSpan::default(),
-    )),
-    (other, _) => Err(EvalError::new(
-      format!(
-        "{method} requires string receiver, got {}",
-        other.type_name()
-      ),
-      SourceSpan::default(),
-    )),
+fn binary_op_from_name(name: &str) -> Option<BinaryOp> {
+  match name {
+    "||" => Some(BinaryOp::Or),
+    "&&" => Some(BinaryOp::And),
+    "==" => Some(BinaryOp::Eq),
+    "!=" => Some(BinaryOp::Ne),
+    "<" => Some(BinaryOp::Lt),
+    "<=" => Some(BinaryOp::Le),
+    ">" => Some(BinaryOp::Gt),
+    ">=" => Some(BinaryOp::Ge),
+    "+" => Some(BinaryOp::Add),
+    "-" => Some(BinaryOp::Sub),
+    "*" => Some(BinaryOp::Mul),
+    "/" => Some(BinaryOp::Div),
+    "%" => Some(BinaryOp::Rem),
+    _ => None,
   }
 }
