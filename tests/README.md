@@ -1,7 +1,7 @@
 # online-dsl-forge Test Assets
 
 - `rust/`: repository-root Cargo integration tests linked from
-  `source/Cargo.toml`
+  `parser/Cargo.toml`, `sema/Cargo.toml`, and `source/Cargo.toml`
 - `scripts/check-tests-rustfmt.sh`: enforces `tests/rustfmt.toml` formatting for
   tracked Rust files under `tests/`
 - `scripts/check-rust-module-size.sh`: keeps Rust source modules under the

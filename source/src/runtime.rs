@@ -1,12 +1,18 @@
+mod capability_check;
+
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use online_dsl_forge_parser::{AstExpression, BinaryOp, ExprKind, SourceSpan, UnaryOp};
+use online_dsl_forge_parser::{BinaryOp, SourceSpan, UnaryOp};
+use online_dsl_forge_sema::{VerifiedExprKindRef, VerifiedExpression, VerifiedProgram};
 
-use crate::compile::{CompiledExpression, RuntimeSchema};
+use crate::compile::{
+  CapabilityKind, CapabilityMeta, CapabilityTicket, CompiledExpression, RuntimeSchema,
+};
 use crate::value::Value;
+use capability_check::verify_runtime_capabilities;
 
 type FunctionHandler = Arc<dyn Fn(&[Value]) -> Result<Value, EvalError> + Send + Sync>;
 type MethodHandler = Arc<dyn Fn(&Value, &[Value]) -> Result<Value, EvalError> + Send + Sync>;
@@ -70,12 +76,14 @@ pub struct DynamicRegistry {
 #[derive(Clone)]
 struct FunctionEntry {
   arity: usize,
+  capability: CapabilityMeta,
   handler: FunctionHandler,
 }
 
 #[derive(Clone)]
 struct MethodEntry {
   arity: usize,
+  capability: CapabilityMeta,
   handler: MethodHandler,
 }
 
@@ -90,12 +98,21 @@ impl DynamicRegistry {
     arity: usize,
     handler: impl Fn(&[Value]) -> Result<Value, EvalError> + Send + Sync + 'static,
   ) -> &mut Self {
+    self.register_function_capability(CapabilityMeta::function(name, arity), handler)
+  }
+
+  pub fn register_function_capability(
+    &mut self,
+    capability: CapabilityMeta,
+    handler: impl Fn(&[Value]) -> Result<Value, EvalError> + Send + Sync + 'static,
+  ) -> &mut Self {
     self
       .functions
-      .entry(name.into())
+      .entry(capability.name.clone())
       .or_default()
       .push(FunctionEntry {
-        arity,
+        arity: capability.arity,
+        capability,
         handler: Arc::new(handler),
       });
     self
@@ -107,12 +124,21 @@ impl DynamicRegistry {
     arity: usize,
     handler: impl Fn(&Value, &[Value]) -> Result<Value, EvalError> + Send + Sync + 'static,
   ) -> &mut Self {
+    self.register_method_capability(CapabilityMeta::method(name, arity), handler)
+  }
+
+  pub fn register_method_capability(
+    &mut self,
+    capability: CapabilityMeta,
+    handler: impl Fn(&Value, &[Value]) -> Result<Value, EvalError> + Send + Sync + 'static,
+  ) -> &mut Self {
     self
       .methods
-      .entry(name.into())
+      .entry(capability.name.clone())
       .or_default()
       .push(MethodEntry {
-        arity,
+        arity: capability.arity,
+        capability,
         handler: Arc::new(handler),
       });
     self
@@ -138,17 +164,31 @@ impl DynamicRegistry {
 
   pub fn schema(&self) -> RuntimeSchema {
     let mut schema = RuntimeSchema::new();
-    for (name, entries) in &self.functions {
+    for entries in self.functions.values() {
       for entry in entries {
-        schema.add_function(name.clone(), entry.arity);
+        schema.add_function_capability(entry.capability.clone());
       }
     }
-    for (name, entries) in &self.methods {
+    for entries in self.methods.values() {
       for entry in entries {
-        schema.add_method(name.clone(), entry.arity);
+        schema.add_method_capability(entry.capability.clone());
       }
     }
     schema
+  }
+
+  fn has_capability_ticket(&self, ticket: &CapabilityTicket) -> bool {
+    match ticket.kind {
+      CapabilityKind::Function => self
+        .functions
+        .get(&ticket.name)
+        .is_some_and(|entries| entries.iter().any(|entry| entry.arity == ticket.arity)),
+      CapabilityKind::Method => self
+        .methods
+        .get(&ticket.name)
+        .is_some_and(|entries| entries.iter().any(|entry| entry.arity == ticket.arity)),
+      CapabilityKind::UnaryOp | CapabilityKind::BinaryOp => true,
+    }
   }
 
   fn call_function(
@@ -244,8 +284,17 @@ pub fn evaluate(
   context: &dyn RuntimeContext,
   limits: EvalLimits,
 ) -> Result<Value, EvalError> {
+  evaluate_verified(expression.verified_program(), context, limits)
+}
+
+pub fn evaluate_verified(
+  program: &VerifiedProgram,
+  context: &dyn RuntimeContext,
+  limits: EvalLimits,
+) -> Result<Value, EvalError> {
+  verify_runtime_capabilities(program, context.registry())?;
   let mut state = EvalState { limits, steps: 0 };
-  state.eval(expression.ast(), context, 0)
+  state.eval(program.root(), context, 0)
 }
 
 struct EvalState {
@@ -256,55 +305,49 @@ struct EvalState {
 impl EvalState {
   fn eval(
     &mut self,
-    expression: &AstExpression,
+    expression: &VerifiedExpression,
     context: &dyn RuntimeContext,
     depth: usize,
   ) -> Result<Value, EvalError> {
-    self.step(expression.span)?;
+    let span = expression.span();
+    self.step(span)?;
     if depth > self.limits.max_depth {
-      return Err(EvalError::new(
-        "evaluation depth limit exceeded",
-        expression.span,
-      ));
+      return Err(EvalError::new("evaluation depth limit exceeded", span));
     }
 
-    match &expression.kind {
-      ExprKind::Null => Ok(Value::Null),
-      ExprKind::Bool { value } => Ok(Value::Bool(*value)),
-      ExprKind::Int { value } => Ok(Value::Int(*value)),
-      ExprKind::Float { value } => Ok(Value::Float(*value)),
-      ExprKind::String { value } => self.checked_string(value.clone(), expression.span),
-      ExprKind::Array { items } => self.eval_array(items, context, depth, expression.span),
-      ExprKind::Identifier { name } => context
+    match expression.kind() {
+      VerifiedExprKindRef::Null => Ok(Value::Null),
+      VerifiedExprKindRef::Bool(value) => Ok(Value::Bool(value)),
+      VerifiedExprKindRef::Int(value) => Ok(Value::Int(value)),
+      VerifiedExprKindRef::Float(value) => Ok(Value::Float(value)),
+      VerifiedExprKindRef::String(value) => self.checked_string(value.to_string(), span),
+      VerifiedExprKindRef::Array(items) => self.eval_array(items, context, depth, span),
+      VerifiedExprKindRef::Identifier(name) => context
         .get_variable(name)
-        .ok_or_else(|| EvalError::new(format!("unknown variable {name}"), expression.span)),
-      ExprKind::Member { receiver, name } => {
+        .ok_or_else(|| EvalError::new(format!("unknown variable {name}"), span)),
+      VerifiedExprKindRef::Member { receiver, name } => {
         let value = self.eval(receiver, context, depth + 1)?;
-        self.eval_member(value, name, expression.span)
+        self.eval_member(value, name, span)
       }
-      ExprKind::FunctionCall { name, args } => {
+      VerifiedExprKindRef::FunctionCall { name, args } => {
         let args = self.eval_args(args, context, depth)?;
-        context
-          .registry()
-          .call_function(name, &args, expression.span)
+        context.registry().call_function(name, &args, span)
       }
-      ExprKind::MethodCall {
+      VerifiedExprKindRef::MethodCall {
         receiver,
         name,
         args,
       } => {
         let receiver = self.eval(receiver, context, depth + 1)?;
         let args = self.eval_args(args, context, depth)?;
-        context
-          .registry()
-          .call_method(&receiver, name, &args, expression.span)
+        context.registry().call_method(&receiver, name, &args, span)
       }
-      ExprKind::Unary { op, expr } => {
+      VerifiedExprKindRef::Unary { op, expr } => {
         let value = self.eval(expr, context, depth + 1)?;
-        self.eval_unary(*op, value, context.registry(), expression.span)
+        self.eval_unary(op, value, context.registry(), span)
       }
-      ExprKind::Binary { left, op, right } => {
-        self.eval_binary(left, *op, right, context, depth, expression.span)
+      VerifiedExprKindRef::Binary { left, op, right } => {
+        self.eval_binary(left, op, right, context, depth, span)
       }
     }
   }
@@ -323,7 +366,7 @@ impl EvalState {
 
   fn eval_array(
     &mut self,
-    items: &[AstExpression],
+    items: &[VerifiedExpression],
     context: &dyn RuntimeContext,
     depth: usize,
     span: SourceSpan,
@@ -340,7 +383,7 @@ impl EvalState {
 
   fn eval_args(
     &mut self,
-    args: &[AstExpression],
+    args: &[VerifiedExpression],
     context: &dyn RuntimeContext,
     depth: usize,
   ) -> Result<Vec<Value>, EvalError> {
@@ -393,9 +436,9 @@ impl EvalState {
 
   fn eval_binary(
     &mut self,
-    left: &AstExpression,
+    left: &VerifiedExpression,
     op: BinaryOp,
-    right: &AstExpression,
+    right: &VerifiedExpression,
     context: &dyn RuntimeContext,
     depth: usize,
     span: SourceSpan,
@@ -698,46 +741,5 @@ fn string_method(
       ),
       SourceSpan::default(),
     )),
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use std::collections::BTreeMap;
-
-  use crate::{CompileOptions, RuntimeSchema, compile_expression, parse_expression};
-
-  use super::{EvalLimits, MapRuntime, Value, default_registry, evaluate};
-
-  #[test]
-  fn evaluates_default_runtime_expression() {
-    let ast = parse_expression("score + 1 >= 10 && name.starts_with('pi')")
-      .expect("expression should parse");
-    let mut variables = BTreeMap::new();
-    variables.insert("score".to_string(), Value::Int(9));
-    variables.insert("name".to_string(), Value::String("piquark".to_string()));
-    let runtime = MapRuntime::new(variables, default_registry());
-    let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
-      .expect("expression should compile");
-    let value = evaluate(&compiled, &runtime, EvalLimits::default()).expect("eval should pass");
-    assert_eq!(value, Value::Bool(true));
-  }
-
-  #[test]
-  fn short_circuits_boolean_and() {
-    let ast = parse_expression("false && missing").expect("expression should parse");
-    let compiled = compile_expression(
-      &ast,
-      &RuntimeSchema::new(),
-      CompileOptions {
-        allow_unknown_variables: true,
-        allow_unknown_functions: false,
-        allow_unknown_methods: false,
-      },
-    )
-    .expect("expression should compile");
-    let runtime = MapRuntime::new(BTreeMap::new(), default_registry());
-    let value = evaluate(&compiled, &runtime, EvalLimits::default()).expect("eval should pass");
-    assert_eq!(value, Value::Bool(false));
   }
 }

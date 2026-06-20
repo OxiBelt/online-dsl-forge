@@ -1,0 +1,79 @@
+[
+  {
+    "id": "waf_request_rejects_response_root",
+    "profile": "waf_request",
+    "input": "Response.Status == 200",
+    "schema": {
+      "preset": "waf"
+    },
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "Response is unavailable in request phase",
+          "span": {
+            "start": 0,
+            "end": 8
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "waf_stream_rejects_request_body",
+    "profile": "waf_stream",
+    "input": "Request.Body.Size > 0",
+    "schema": {
+      "preset": "waf"
+    },
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "Request.Body is unavailable in stream phase",
+          "span": {
+            "start": 0,
+            "end": 12
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "waf_regex_requires_literal",
+    "profile": "waf_request",
+    "input": "Request.Body.Text.matches(pattern)",
+    "schema": {
+      "preset": "waf",
+      "variables": ["pattern"]
+    },
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "regex argument must be a string literal",
+          "span": {
+            "start": 26,
+            "end": 33
+          }
+        }
+      ]
+    }
+  },
+  {
+    "id": "mitigation_field_rejects_payload_bytes",
+    "profile": "mitigation_request",
+    "input": "Request.Body.Text",
+    "schema": {
+      "preset": "waf"
+    },
+    "expected": {
+      "diagnostics": [
+        {
+          "message": "MitigationField cannot read request, response, or stream body bytes",
+          "span": {
+            "start": 0,
+            "end": 17
+          }
+        }
+      ]
+    }
+  }
+]

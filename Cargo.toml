@@ -1,6 +1,6 @@
 [workspace]
-members = ["parser", "source"]
-default-members = ["parser", "source"]
+members = ["parser", "sema", "source"]
+default-members = ["parser", "sema", "source"]
 resolver = "3"
 
 [profile.release]

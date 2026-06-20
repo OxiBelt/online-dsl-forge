@@ -1,21 +1,25 @@
 # online-dsl-forge
 
 `online-dsl-forge` is a Rust library for parsing, canonicalizing, compiling,
-and evaluating a small bounded DSL expression language in memory.
+semantically validating, and evaluating a small bounded DSL expression language
+in memory.
 
 The crate exists for host applications that need a canonical runtime and
 operator interface for DSL expressions without adopting a general-purpose
 scripting language. It re-exports the publishable `online-dsl-forge-parser`
-syntax crate and exposes compile validation, a dynamic runtime registry, and
-CLI tooling.
+syntax crate and exposes sema-backed compile validation, a dynamic runtime
+registry, and CLI tooling.
 
 ## Capabilities
 
 - Re-exported handwritten lexer, recursive-descent expression parser,
   span-carrying AST, diagnostics, and formatter from `online-dsl-forge-parser`.
-- Compile-time validation against host-provided runtime schemas.
+- Re-exported semantic analyzer, runtime schemas, security profiles, and
+  verified IR from `online-dsl-forge-sema`.
+- Compile-time validation against host-provided runtime schemas and security
+  profiles.
 - Bounded in-memory evaluation with a dynamic variable, function, method, and
-  operator registry.
+  operator registry that executes sema-verified programs.
 - `online-dsl-forgectl` commands for `check`, `ast`, `fmt`, and `eval`.
 
 The language intentionally excludes loops, assignment, imports, callbacks,

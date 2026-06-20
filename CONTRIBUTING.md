@@ -2,8 +2,9 @@
 
 Thanks for helping improve `online-dsl-forge`. This project parses and
 evaluates untrusted DSL input, so changes to lexing, parsing, AST
-canonicalization, compile validation, runtime values, operator dispatch,
-function/method calls, and evaluation limits must be reviewed as
+canonicalization, semantic validation, security profiles, runtime schemas,
+runtime values, operator dispatch, function/method calls, and evaluation limits
+must be reviewed as
 security-sensitive unless there is a clear reason they are not.
 
 Use root-relative paths in root-level documentation, scripts, issues, and pull
@@ -23,8 +24,11 @@ be committed.
 | `parser/src/ast.rs` | Public AST model. | Syntax shape, serde AST, spans, or canonical representation changes. |
 | `parser/src/parser.rs` and `parser/src/lexer.rs` | Handwritten parser pipeline. | Tokens, grammar, precedence, diagnostics, or parse recovery change. |
 | `parser/src/format.rs` | Canonical formatting. | Normalized expression output or idempotency changes. |
-| `source/` | Umbrella Rust crate and CLI. | You are changing compile validation, runtime, CLI, public re-exports, or integration behavior. |
-| `source/src/compile.rs` | Compile-time validation. | Runtime schema checks, function arity checks, or validation policy changes. |
+| `sema/` | Semantic analysis Rust crate. | You are changing runtime schemas, security profiles, capability metadata, regex policy, body-need inference, or verified IR. |
+| `sema/src/analyzer.rs` | Semantic analyzer. | Validation traversal, diagnostics, phase restrictions, cost limits, regex checks, or body-access inference change. |
+| `sema/src/schema.rs` and `sema/src/profile.rs` | Host schema and security profile model. | Public semantic API, capability metadata, profile defaults, or body-access types change. |
+| `source/` | Umbrella Rust crate and CLI. | You are changing runtime, CLI, public re-exports, compatibility compile API, or integration behavior. |
+| `source/src/compile.rs` | Compatibility re-exports for semantic validation. | Public compile API exports change. |
 | `source/src/runtime.rs` and `source/src/value.rs` | Evaluation and host integration. | Values, function/method/operator registry, limits, or evaluation semantics change. |
 | `source/src/bin/` | CLI tooling. | `online-dsl-forgectl` commands or command output changes. |
 | `tests/rust/` | Rust integration tests and repository-level checks. | Behavior changes need regression coverage. |
@@ -34,11 +38,12 @@ be committed.
 
 ## Contribution Workflow
 
-1. Identify the affected area before editing: parser, AST, formatter,
-   compiler, runtime, CLI, tests, CI, or documentation.
+1. Identify the affected area before editing: parser, AST, formatter, semantic
+   analyzer, runtime, CLI, tests, CI, or documentation.
 2. Make the smallest reasonable change for the behavior being changed.
 3. Add or update tests when syntax, diagnostics, canonical formatting, compile
-   validation, evaluation, CLI, or public API behavior changes.
+   validation, security-profile, evaluation, CLI, or public API behavior
+   changes.
 4. Update documentation when behavior, syntax, commands, or public APIs change.
 5. Run the relevant checks and mention any checks that could not be run.
 6. Verify that generated test data and temporary files are cleaned up.
@@ -71,11 +76,12 @@ pnpm run test
 pnpm run versioning:check
 ```
 
-The committed Cargo version for `online-dsl-forge-parser` and
-`online-dsl-forge` must remain `0.0.0` in `parser/Cargo.toml`,
-`source/Cargo.toml`, and `Cargo.lock`. Release CI derives the publish version
-from the triggering SemVer tag, rewrites both crates in the checkout for that
-workflow run, publishes `online-dsl-forge-parser` first, and then publishes the
+The committed Cargo version for `online-dsl-forge-parser`,
+`online-dsl-forge-sema`, and `online-dsl-forge` must remain `0.0.0` in
+`parser/Cargo.toml`, `sema/Cargo.toml`, `source/Cargo.toml`, and `Cargo.lock`.
+Release CI derives the publish version from the triggering SemVer tag, rewrites
+all three crates in the checkout for that workflow run, publishes
+`online-dsl-forge-parser` first, then `online-dsl-forge-sema`, and then the
 umbrella `online-dsl-forge` crate.
 
 ## Commit Messages
@@ -115,14 +121,16 @@ new Rust module or source file under the most appropriate directory and wire it
 through `lib.rs` or the relevant binary as needed.
 
 Treat 750 lines as the review threshold for Rust source files under
-`parser/src/` and `source/src/`. Files above that threshold should be split into
-smaller responsibility-focused modules unless there is a documented reason to
-keep the implementation together.
+`parser/src/`, `sema/src/`, and `source/src/`. Files above that threshold should
+be split into smaller responsibility-focused modules unless there is a
+documented reason to keep the implementation together.
 
 Keep module boundaries explicit:
 
 - Lexing and tokenization should not be placed in runtime files.
 - Parse-tree and public AST definitions should not be mixed with evaluation.
+- Security profiles, capability metadata, regex policy, and verified IR belong
+  in `sema/`, not in parser or runtime files.
 - Host registry behavior should stay in runtime-focused modules.
 - CLI argument handling should stay in binary or CLI support modules.
 - Detailed syntax rules belong in `docs/Expression.md`, not only in comments.
@@ -134,7 +142,8 @@ certificates, private keys, or production data in tests or examples.
 
 Treat all DSL source strings and runtime JSON bindings as untrusted input.
 
-When modifying parser or runtime behavior, explicitly consider:
+When modifying parser, semantic analyzer, or runtime behavior, explicitly
+consider:
 
 - stack depth and recursive input shape
 - expression step limits
@@ -142,6 +151,8 @@ When modifying parser or runtime behavior, explicitly consider:
 - division or remainder by zero
 - string and array growth
 - unknown variables, functions, methods, and object members
+- profile phase restrictions and body-access inference
+- regex admission, literal precompilation, and dynamic regex rejection paths
 - malformed UTF-8 boundaries in diagnostics
 - serialization compatibility
 - fail-closed behavior on validation or runtime errors

@@ -7,6 +7,7 @@ import { cleanVersionFromTagRef, runVersioning } from '../sources/versioning.js'
 
 const PackageName = 'online-dsl-forge'
 const ParserPackageName = 'online-dsl-forge-parser'
+const SemaPackageName = 'online-dsl-forge-sema'
 
 type Workspace = {
   root: string
@@ -65,11 +66,14 @@ checksum = "placeholder"
 function createSplitWorkspace(manifestVersion = '0.0.0', lockVersion = '0.0.0'): Workspace {
   const root = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'online-dsl-forge-versioning-'))
   const parserDir = Path.join(root, 'parser')
+  const semaDir = Path.join(root, 'sema')
   const sourceDir = Path.join(root, 'source')
   Fs.mkdirSync(parserDir)
+  Fs.mkdirSync(semaDir)
   Fs.mkdirSync(sourceDir)
 
   const parserManifestPath = Path.join(parserDir, 'Cargo.toml')
+  const semaManifestPath = Path.join(semaDir, 'Cargo.toml')
   const manifestPath = Path.join(sourceDir, 'Cargo.toml')
   const lockfilePath = Path.join(root, 'Cargo.lock')
 
@@ -91,6 +95,24 @@ serde = "1.0.228"
   )
 
   Fs.writeFileSync(
+    semaManifestPath,
+    `[package]
+name = "${SemaPackageName}"
+version = "${manifestVersion}"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+description = "Semantic analysis crate."
+repository = "https://github.com/OxiBelt/online-dsl-forge"
+publish = false
+
+[dependencies]
+online-dsl-forge-parser = { path = "../parser", version = "${manifestVersion}" }
+serde = "1.0.228"
+`
+  )
+
+  Fs.writeFileSync(
     manifestPath,
     `[package]
 name = "${PackageName}"
@@ -104,6 +126,7 @@ publish = false
 
 [dependencies]
 online-dsl-forge-parser = { path = "../parser", version = "${manifestVersion}" }
+online-dsl-forge-sema = { path = "../sema", version = "${manifestVersion}" }
 serde = "1.0.228"
 `
   )
@@ -118,6 +141,7 @@ name = "${PackageName}"
 version = "${lockVersion}"
 dependencies = [
  "${ParserPackageName}",
+ "${SemaPackageName}",
  "serde",
 ]
 
@@ -125,6 +149,14 @@ dependencies = [
 name = "${ParserPackageName}"
 version = "${lockVersion}"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "${SemaPackageName}"
+version = "${lockVersion}"
+dependencies = [
+ "${ParserPackageName}",
  "serde",
 ]
 
@@ -182,6 +214,7 @@ test('check mode accepts committed placeholder versions for a package set', t =>
     lockfilePath: 'Cargo.lock',
     packages: [
       { packageName: ParserPackageName, manifestPath: 'parser/Cargo.toml' },
+      { packageName: SemaPackageName, manifestPath: 'sema/Cargo.toml' },
       { packageName: PackageName, manifestPath: 'source/Cargo.toml' }
     ],
     releasePublish: false
@@ -189,7 +222,7 @@ test('check mode accepts committed placeholder versions for a package set', t =>
 
   Assert.deepEqual(result, {
     mode: 'check',
-    packageName: `${ParserPackageName},${PackageName}`,
+    packageName: `${ParserPackageName},${SemaPackageName},${PackageName}`,
     version: '0.0.0'
   })
 })
@@ -258,25 +291,37 @@ test('release mode applies tag version to package set and local dependencies', t
     lockfilePath: 'Cargo.lock',
     packages: [
       { packageName: ParserPackageName, manifestPath: 'parser/Cargo.toml' },
+      { packageName: SemaPackageName, manifestPath: 'sema/Cargo.toml' },
       { packageName: PackageName, manifestPath: 'source/Cargo.toml' }
     ],
     releasePublish: true
   })
 
   const parserManifest = Fs.readFileSync(Path.join(workspace.root, 'parser/Cargo.toml'), 'utf8')
+  const semaManifest = Fs.readFileSync(Path.join(workspace.root, 'sema/Cargo.toml'), 'utf8')
   const manifest = Fs.readFileSync(workspace.manifestPath, 'utf8')
   const lockfile = Fs.readFileSync(workspace.lockfilePath, 'utf8')
 
   Assert.equal(result.version, '1.2.3-beta.1')
   Assert.match(parserManifest, /^version = "1\.2\.3-beta\.1"$/m)
   Assert.doesNotMatch(parserManifest, /^publish\s*=\s*false$/m)
+  Assert.match(semaManifest, /^version = "1\.2\.3-beta\.1"$/m)
+  Assert.match(
+    semaManifest,
+    /^online-dsl-forge-parser = \{ path = "\.\.\/parser", version = "1\.2\.3-beta\.1" \}$/m
+  )
+  Assert.doesNotMatch(semaManifest, /^publish\s*=\s*false$/m)
   Assert.match(manifest, /^version = "1\.2\.3-beta\.1"$/m)
   Assert.match(
     manifest,
     /^online-dsl-forge-parser = \{ path = "\.\.\/parser", version = "1\.2\.3-beta\.1" \}$/m
   )
+  Assert.match(
+    manifest,
+    /^online-dsl-forge-sema = \{ path = "\.\.\/sema", version = "1\.2\.3-beta\.1" \}$/m
+  )
   Assert.doesNotMatch(manifest, /^publish\s*=\s*false$/m)
-  Assert.equal((lockfile.match(/^version = "1\.2\.3-beta\.1"$/gm) ?? []).length, 2)
+  Assert.equal((lockfile.match(/^version = "1\.2\.3-beta\.1"$/gm) ?? []).length, 3)
 })
 
 test('release mode requires a tag ref', t => {

@@ -8,8 +8,8 @@
     "lint": "eslint",
     "test": "node --import tsx devops/tests/versioning.test.ts",
     "typecheck": "tsc --noEmit",
-    "versioning:check": "node --import tsx devops/sources/versioning.ts --workspace-path . --packages online-dsl-forge-parser=parser/Cargo.toml,online-dsl-forge=source/Cargo.toml --lockfile-path Cargo.lock",
-    "versioning:release": "node --import tsx devops/sources/versioning.ts --workspace-path . --packages online-dsl-forge-parser=parser/Cargo.toml,online-dsl-forge=source/Cargo.toml --lockfile-path Cargo.lock --ref \"$ONLINE_DSL_FORGE_RELEASE_REF\" --release-publish"
+    "versioning:check": "node --import tsx devops/sources/versioning.ts --workspace-path . --packages online-dsl-forge-parser=parser/Cargo.toml,online-dsl-forge-sema=sema/Cargo.toml,online-dsl-forge=source/Cargo.toml --lockfile-path Cargo.lock",
+    "versioning:release": "node --import tsx devops/sources/versioning.ts --workspace-path . --packages online-dsl-forge-parser=parser/Cargo.toml,online-dsl-forge-sema=sema/Cargo.toml,online-dsl-forge=source/Cargo.toml --lockfile-path Cargo.lock --ref \"$ONLINE_DSL_FORGE_RELEASE_REF\" --release-publish"
   },
   "dependencies": {
     "@typescriptprime/parsing": "^2.0.1",

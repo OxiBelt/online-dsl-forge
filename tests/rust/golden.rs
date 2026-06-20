@@ -1,6 +1,6 @@
 use online_dsl_forge::{
-  CompileOptions, EvalLimits, MapRuntime, RuntimeSchema, compile_expression, evaluate,
-  format_expression, parse_expression,
+  Analyzer, BodyAccess, CompileOptions, EvalLimits, MapRuntime, RuntimeSchema, SecurityProfile,
+  compile_expression, evaluate, format_expression, parse_expression,
 };
 use serde_json::{Value as JsonValue, json};
 
@@ -8,6 +8,7 @@ const PARSING: &str = include_str!("../golden/parsing.json");
 const FORMATTING: &str = include_str!("../golden/formatting.json");
 const PARSE_DIAGNOSTICS: &str = include_str!("../golden/parse-diagnostics.json");
 const COMPILE_DIAGNOSTICS: &str = include_str!("../golden/compile-diagnostics.json");
+const SEMA_DIAGNOSTICS: &str = include_str!("../golden/sema-diagnostics.json");
 const EVALUATION: &str = include_str!("../golden/evaluation.json");
 const RULEPACK_RENDER_DEFERRED: &str = include_str!("../golden/rulepack-render/deferred.json");
 const BODY_NEED_DEFERRED: &str = include_str!("../golden/body-need/deferred.json");
@@ -88,6 +89,26 @@ fn compile_diagnostics_match_golden_fixtures() {
 }
 
 #[test]
+fn sema_diagnostics_match_golden_fixtures() {
+  for case in fixture_cases(SEMA_DIAGNOSTICS) {
+    let id = case_id(&case);
+    let input = required_str(&case, "input");
+    let ast = parse_expression(input).unwrap_or_else(|error| {
+      panic!("{id}: expected expression to parse, got {error}");
+    });
+    let schema = sema_schema(required_value(&case, "schema"));
+    let profile = sema_profile(required_str(&case, "profile"));
+
+    let actual = match Analyzer::new(profile).analyze(&ast, &schema) {
+      Ok(_) => json!({ "diagnostics": [] }),
+      Err(error) => serde_json::to_value(&error).expect("diagnostics should serialize"),
+    };
+
+    assert_json_eq(id, &actual, required_value(&case, "expected"));
+  }
+}
+
+#[test]
 fn evaluation_matches_golden_fixtures() {
   for case in fixture_cases(EVALUATION) {
     let id = case_id(&case);
@@ -159,7 +180,7 @@ fn deferred_rulepack_render_fixtures_are_well_formed() {
 }
 
 #[test]
-fn deferred_body_need_fixtures_are_well_formed_and_parseable() {
+fn deferred_body_need_fixtures_match_sema_analysis() {
   for case in fixture_cases(BODY_NEED_DEFERRED) {
     let id = case_id(&case);
     let origin = required_str(&case, "origin");
@@ -169,9 +190,10 @@ fn deferred_body_need_fixtures_are_well_formed_and_parseable() {
       origin.starts_with("/references/OxiBelt/"),
       "{id}: origin should point to the OxiBelt reference tree"
     );
-    parse_expression(expression).unwrap_or_else(|error| {
+    let ast = parse_expression(expression).unwrap_or_else(|error| {
       panic!("{id}: body-need expression should parse, got {error}");
     });
+    let mut schema = RuntimeSchema::waf();
 
     for function in required_array(&case, "functions") {
       let function_name = required_str(function, "name");
@@ -179,14 +201,37 @@ fn deferred_body_need_fixtures_are_well_formed_and_parseable() {
         !required_array(function, "params").is_empty(),
         "{id}: function {function_name} should list params"
       );
-      parse_expression(required_str(function, "expression")).unwrap_or_else(|error| {
-        panic!("{id}: function {function_name} expression should parse, got {error}");
-      });
+      let function_expression = parse_expression(required_str(function, "expression"))
+        .unwrap_or_else(|error| {
+          panic!("{id}: function {function_name} expression should parse, got {error}");
+        });
+      schema.add_expression_function(
+        function_name,
+        required_array(function, "params")
+          .iter()
+          .map(|param| param.as_str().expect("function params must be strings")),
+        function_expression,
+      );
     }
 
     let expected = required_value(&case, "expected");
     assert_body_need(id, required_str(expected, "request_body"));
     assert_body_need(id, required_str(expected, "response_body"));
+
+    let verified = Analyzer::new(SecurityProfile::generic_safe())
+      .analyze(&ast, &schema)
+      .unwrap_or_else(|error| panic!("{id}: body-need expression should analyze, got {error}"));
+    let actual = verified.body_need();
+    assert_eq!(
+      actual.request,
+      body_access(required_str(expected, "request_body")),
+      "{id}: request body need changed"
+    );
+    assert_eq!(
+      actual.response,
+      body_access(required_str(expected, "response_body")),
+      "{id}: response body need changed"
+    );
   }
 }
 
@@ -271,6 +316,48 @@ fn runtime_schema(value: Option<&JsonValue>) -> RuntimeSchema {
   }
 
   schema
+}
+
+fn sema_schema(value: &JsonValue) -> RuntimeSchema {
+  let mut schema = if value.get("preset").and_then(JsonValue::as_str) == Some("waf") {
+    RuntimeSchema::waf()
+  } else {
+    RuntimeSchema::new()
+  };
+
+  if let Some(variables) = value.get("variables").and_then(JsonValue::as_array) {
+    for variable in variables {
+      schema.add_variable(
+        variable
+          .as_str()
+          .expect("schema variable entries must be strings"),
+      );
+    }
+  }
+
+  schema
+}
+
+fn sema_profile(value: &str) -> SecurityProfile {
+  match value {
+    "generic_safe" => SecurityProfile::generic_safe(),
+    "waf_request" => SecurityProfile::waf_request(),
+    "waf_response" => SecurityProfile::waf_response(),
+    "waf_stream" => SecurityProfile::waf_stream(),
+    "mitigation_request" => SecurityProfile::mitigation_field(online_dsl_forge::Phase::Request),
+    "mitigation_response" => SecurityProfile::mitigation_field(online_dsl_forge::Phase::Response),
+    "mitigation_stream" => SecurityProfile::mitigation_field(online_dsl_forge::Phase::Stream),
+    other => panic!("unknown sema profile {other}"),
+  }
+}
+
+fn body_access(value: &str) -> BodyAccess {
+  match value {
+    "none" => BodyAccess::None,
+    "size_only" => BodyAccess::SizeOnly,
+    "prefix_bytes" => BodyAccess::PrefixBytes,
+    other => panic!("unknown body access {other}"),
+  }
 }
 
 fn compile_options(value: Option<&JsonValue>) -> CompileOptions {

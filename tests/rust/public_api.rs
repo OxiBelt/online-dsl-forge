@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use online_dsl_forge::{
-  CompileOptions, EvalLimits, MapRuntime, Value, compile_expression, evaluate, format_expression,
-  parse_expression,
+  CompileOptions, DynamicRegistry, EvalLimits, MapRuntime, RuntimeSchema, Value,
+  compile_expression, evaluate, format_expression, parse_expression,
 };
 
 #[test]
@@ -49,4 +49,45 @@ fn compile_validation_reports_all_direct_unknowns() {
 
   assert!(message.contains("unknown variable left"));
   assert!(message.contains("unknown variable right"));
+}
+
+#[test]
+fn runtime_short_circuits_boolean_and() {
+  let ast = parse_expression("false && missing").expect("expression should parse");
+  let compiled = compile_expression(
+    &ast,
+    &RuntimeSchema::new(),
+    CompileOptions {
+      allow_unknown_variables: true,
+      allow_unknown_functions: false,
+      allow_unknown_methods: false,
+    },
+  )
+  .expect("expression should compile");
+  let runtime = MapRuntime::new(BTreeMap::new(), online_dsl_forge::default_registry());
+
+  let value = evaluate(&compiled, &runtime, EvalLimits::default()).expect("eval should pass");
+
+  assert_eq!(value, Value::Bool(false));
+}
+
+#[test]
+fn runtime_rejects_missing_verified_registry_capability() {
+  let ast = parse_expression("len(items)").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("items").add_function("len", 1);
+  let compiled = compile_expression(&ast, &schema, CompileOptions::default())
+    .expect("expression should compile");
+  let mut variables = BTreeMap::new();
+  variables.insert("items".to_string(), Value::Array(Vec::new()));
+  let runtime = MapRuntime::new(variables, DynamicRegistry::new());
+
+  let error = evaluate(&compiled, &runtime, EvalLimits::default())
+    .expect_err("missing registry capability should fail closed");
+
+  assert!(
+    error
+      .to_string()
+      .contains("runtime registry is missing verified function len")
+  );
 }

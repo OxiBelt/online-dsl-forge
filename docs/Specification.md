@@ -1,7 +1,8 @@
 # online-dsl-forge Technical Specification
 
 Status: Draft
-Target project: `online-dsl-forge` Rust DSL parser and runtime library
+Target project: `online-dsl-forge` Rust DSL parser, semantic analyzer, and
+runtime library
 
 This document is the compact behavior specification for `online-dsl-forge`.
 Expression syntax is covered in [Expression.md](Expression.md).
@@ -9,16 +10,18 @@ Expression syntax is covered in [Expression.md](Expression.md).
 ## Scope
 
 `online-dsl-forge-parser` parses and canonicalizes bounded DSL expressions.
-The umbrella `online-dsl-forge` crate re-exports that parser API and adds
-compile validation plus bounded runtime evaluation. Host applications provide
-runtime bindings, functions, methods, and optional operator overrides through
-Rust APIs.
+`online-dsl-forge-sema` validates parsed ASTs against runtime schemas and
+security profiles, then emits verified programs. The umbrella
+`online-dsl-forge` crate re-exports those APIs and adds bounded runtime
+evaluation. Host applications provide runtime bindings, functions, methods,
+and optional operator overrides through Rust APIs.
 
 The implementation is optimized for:
 
 - embedding in larger Rust applications
 - deterministic canonical AST and formatting
-- strict validation of untrusted input
+- strict semantic validation of untrusted input
+- explicit security profiles and capability metadata
 - bounded evaluation without external I/O
 - minimal dependencies
 - OxiBelt-like repository layout and contribution workflow
@@ -65,27 +68,37 @@ format(parse(format(parse(input)))) == format(parse(input))
 Whitespace is normalized around binary operators and after commas. String
 literals are emitted with deterministic escaping.
 
-## Compile Validation
+## Semantic Validation
 
-Compilation validates parsed AST against a host-provided runtime schema.
-Validation covers:
+Semantic analysis validates parsed AST against a host-provided runtime schema
+and security profile. Validation covers:
 
 - unknown variables unless explicitly allowed by `CompileOptions`
 - unknown functions
 - function arity
 - unknown methods unless explicitly allowed by `CompileOptions`
 - method arity when a method signature is registered
+- capability phase availability
+- request, response, and stream body-access inference
+- WAF profile restrictions such as request-phase rejection of `Response`
+- regex admission policy and literal regex precompilation for strict profiles
+- static AST node, call-depth, and cost limits
 
-Compilation does not execute user code. It returns a `CompiledExpression` that
-can be evaluated repeatedly against compatible runtime contexts.
+The compatibility `compile_expression` API uses the generic safe profile and
+returns a `CompiledExpression` backed by sema's verified program.
+
+Semantic analysis does not execute user code. It returns a verified program
+that can be evaluated repeatedly against compatible runtime contexts.
 
 ## Runtime Evaluation
 
-Runtime evaluation receives a compiled expression, a `RuntimeContext`, and
-`EvalLimits`.
+Runtime evaluation receives a compiled expression or verified program, a
+`RuntimeContext`, and `EvalLimits`.
 
 The runtime:
 
+- evaluates sema-verified IR rather than arbitrary parser AST
+- rejects runtime registries missing verified function or method capabilities
 - resolves identifiers from the context
 - dispatches functions, methods, and optional operator overrides through a
   dynamic registry
@@ -96,6 +109,10 @@ The runtime:
 
 Runtime values are JSON-compatible: null, booleans, integers, floats, strings,
 arrays, and objects.
+
+Compiled expressions are validation artifacts. Host applications should parse
+and analyze expressions through `online-dsl-forge-sema`; they should not treat
+serialized ASTs or external data as already verified runtime input.
 
 ## CLI
 
