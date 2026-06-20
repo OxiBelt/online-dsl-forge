@@ -1,9 +1,11 @@
 [package]
 name = "online-dsl-forge"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
 rust-version = "1.96"
 license = "Apache-2.0"
+description = "A bounded parser and runtime for in-memory DSL expressions."
+repository = "https://github.com/OxiBelt/online-dsl-forge"
 publish = false
 
 [dependencies]

@@ -59,6 +59,21 @@ cargo audit
 cargo deny check advisories
 ```
 
+When changing versioning or release automation, also run:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm run lint
+pnpm run typecheck
+pnpm run test
+pnpm run versioning:check
+```
+
+The committed `online-dsl-forge` Cargo version must remain `0.0.0` in
+`source/Cargo.toml` and `Cargo.lock`. Release CI derives the publish version
+from the triggering SemVer tag, rewrites the checkout for that workflow run, and
+publishes from the rewritten checkout.
+
 ## Commit Messages
 
 Use Conventional Commits for commit messages:

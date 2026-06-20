@@ -1,0 +1,29 @@
+{
+  "name": "online-dsl-forge",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "packageManager": "pnpm@11.8.0",
+  "scripts": {
+    "lint": "eslint",
+    "test": "node --import tsx devops/tests/versioning.test.ts",
+    "typecheck": "tsc --noEmit",
+    "versioning:check": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path source/Cargo.toml --lockfile-path Cargo.lock --package-name online-dsl-forge",
+    "versioning:release": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path source/Cargo.toml --lockfile-path Cargo.lock --package-name online-dsl-forge --ref \"$ONLINE_DSL_FORGE_RELEASE_REF\" --release-publish"
+  },
+  "dependencies": {
+    "@typescriptprime/parsing": "^2.0.1",
+    "semver": "^7.7.4",
+    "smol-toml": "^1.4.2",
+    "tsx": "^4.21.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.3",
+    "@types/semver": "^7.7.1",
+    "@typescript-eslint/eslint-plugin": "^8.59.2",
+    "@typescript-eslint/parser": "^8.59.2",
+    "eslint": "^10.3.0",
+    "typescript": "^6.0.3"
+  }
+}

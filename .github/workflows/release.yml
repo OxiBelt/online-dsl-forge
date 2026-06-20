@@ -1,0 +1,68 @@
+name: Release online-dsl-forge
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  crates-io:
+    name: Publish crate to crates.io
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustup component add rustfmt clippy --toolchain 1.96.0
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.8.0 --activate
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Apply release version
+        run: pnpm run versioning:release
+        env:
+          ONLINE_DSL_FORGE_RELEASE_REF: ${{ github.ref }}
+
+      - name: Cargo fmt
+        run: cargo fmt --check
+
+      - name: Tests rustfmt
+        run: tests/scripts/check-tests-rustfmt.sh
+
+      - name: Rust module size
+        run: tests/scripts/check-rust-module-size.sh
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --all-features --locked
+
+      - name: Cargo publish dry run
+        run: cargo publish --manifest-path source/Cargo.toml --locked --dry-run
+
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Publish crate
+        run: cargo publish --manifest-path source/Cargo.toml --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
