@@ -123,7 +123,8 @@ that can be evaluated repeatedly against compatible runtime contexts.
 Verified programs carry the original AST, a semantically verified expression
 tree, the security profile used for analysis, static body need, static cost
 upper bound, admitted regex literals, precompiled regex cache, and the exact
-capability metadata snapshot required by the program.
+capability metadata snapshot required by the program. The regex cache is scoped
+to the verified program; host runtime bindings do not own or mutate it.
 
 Function and method calls plus unary and binary operators carry capability
 tickets in the verified tree. Expression functions are expanded during semantic
@@ -146,10 +147,23 @@ The runtime:
 - resolves identifiers from the context
 - dispatches functions, methods, and optional operator overrides through a
   dynamic registry
+- passes a `RuntimeCallContext` to context-aware function and method handlers so
+  they can inspect the active security profile and use verified precompiled
+  regex literals
 - enforces step and recursion-depth limits
 - fails closed on unknown names, type errors, arity errors, arithmetic
   overflow, division by zero, budget exhaustion, and missing object members
 - short-circuits `&&` and `||`
+
+Handlers registered with `register_function_with_context`,
+`register_function_capability_with_context`, `register_method_with_context`, or
+`register_method_capability_with_context` can call
+`RuntimeCallContext::require_precompiled_regex` or
+`RuntimeCallContext::precompiled_regex_is_match`. These helpers only succeed
+for literals admitted and compiled during semantic analysis. If a handler
+requires a precompiled regex for a dynamic pattern or for a literal that was not
+part of the verified program, evaluation fails closed with an `EvalError`.
+`RegexFlavor::HeaderName` regexes are compiled case-insensitively.
 
 Runtime values are JSON-compatible: null, booleans, integers, floats, strings,
 arrays, and objects.

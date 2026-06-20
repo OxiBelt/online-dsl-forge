@@ -8,17 +8,18 @@ pub mod value;
 
 pub use compile::{
   Analyzer, BodyAccess, BodyNeedSummary, BodyPathRule, BodyTarget, CapabilityKind, CapabilityMeta,
-  CapabilityTicket, CompileOptions, CompiledExpression, CostModel, Determinism, ExpressionFunction,
-  ExpressionFunctionDiagnostic, ExpressionFunctionScope, Phase, RegexArgMeta, RegexFlavor,
-  RegexPolicy, RuntimeSchema, SecurityProfile, SecurityProfileId, SignatureMatch, TypeClass,
-  VariableMeta, VerifiedExprKindRef, VerifiedExpression, VerifiedProgram, compile_expression,
+  CapabilityTicket, CompileOptions, CompiledExpression, CompiledRegexCache, CostModel, Determinism,
+  ExpressionFunction, ExpressionFunctionDiagnostic, ExpressionFunctionScope, Phase, RegexArgMeta,
+  RegexFlavor, RegexLiteral, RegexPolicy, RuntimeSchema, SecurityProfile, SecurityProfileId,
+  SignatureMatch, TypeClass, VariableMeta, VerifiedExprKindRef, VerifiedExpression,
+  VerifiedProgram, compile_expression,
 };
 pub use parser::{
   AstExpression, BinaryOp, Diagnostic, DiagnosticReport, ExprKind, SourceSpan, UnaryOp, ast,
   diagnostics, format, format_expression, lexer, parse_expression, span,
 };
 pub use runtime::{
-  DynamicRegistry, EvalError, EvalLimits, MapRuntime, RuntimeContext, default_registry, evaluate,
-  evaluate_verified,
+  DynamicRegistry, EvalError, EvalLimits, MapRuntime, RuntimeCallContext, RuntimeContext,
+  default_registry, evaluate, evaluate_verified,
 };
 pub use value::Value;

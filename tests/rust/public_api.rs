@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use online_dsl_forge::{
   Analyzer, BinaryOp, CapabilityMeta, CompileOptions, CostModel, DynamicRegistry, EvalLimits,
-  MapRuntime, RuntimeSchema, SecurityProfile, Value, compile_expression, evaluate,
+  MapRuntime, RegexFlavor, RuntimeSchema, SecurityProfile, Value, compile_expression, evaluate,
   evaluate_verified, format_expression, parse_expression,
 };
 
@@ -186,4 +186,118 @@ fn evaluate_verified_accepts_analyzer_output() {
     .expect("verified expression should evaluate");
 
   assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn context_aware_method_uses_precompiled_regex() {
+  let ast = parse_expression("name.matches(\"^pi\")").expect("expression should parse");
+  let mut variables = BTreeMap::new();
+  variables.insert("name".to_string(), Value::String("piquark".to_string()));
+  let runtime = MapRuntime::new(variables, regex_registry());
+
+  let verified = Analyzer::new(SecurityProfile::waf_request())
+    .analyze(&ast, &runtime.schema())
+    .expect("literal regex should analyze");
+  let value = evaluate_verified(&verified, &runtime, EvalLimits::default())
+    .expect("precompiled regex should evaluate");
+
+  assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn context_aware_method_fails_closed_on_missing_precompiled_regex() {
+  let ast = parse_expression("name.matches(pattern)").expect("expression should parse");
+  let mut variables = BTreeMap::new();
+  variables.insert("name".to_string(), Value::String("piquark".to_string()));
+  variables.insert("pattern".to_string(), Value::String("^pi".to_string()));
+  let runtime = MapRuntime::new(variables, regex_registry());
+
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &runtime.schema())
+    .expect("dynamic regex should analyze under generic safe profile");
+  let error = evaluate_verified(&verified, &runtime, EvalLimits::default())
+    .expect_err("missing precompiled regex should fail closed");
+
+  assert!(
+    error
+      .to_string()
+      .contains("precompiled default regex is missing")
+  );
+}
+
+#[test]
+fn context_aware_method_uses_multiple_regex_flavors() {
+  let ast = parse_expression("headers.anyEntryMatches(\"content-type\", \"token\")")
+    .expect("expression should parse");
+  let mut headers = BTreeMap::new();
+  headers.insert(
+    "CONTENT-TYPE".to_string(),
+    Value::String("bearer token".to_string()),
+  );
+  let mut variables = BTreeMap::new();
+  variables.insert("headers".to_string(), Value::Object(headers));
+  let runtime = MapRuntime::new(variables, regex_registry());
+
+  let verified = Analyzer::new(SecurityProfile::waf_request())
+    .analyze(&ast, &runtime.schema())
+    .expect("multi-regex capability should analyze");
+  let value = evaluate_verified(&verified, &runtime, EvalLimits::default())
+    .expect("multi-regex method should evaluate");
+
+  assert_eq!(value, Value::Bool(true));
+}
+
+fn regex_registry() -> DynamicRegistry {
+  let mut registry = DynamicRegistry::new();
+  registry.register_method_capability_with_context(
+    CapabilityMeta::method("matches", 1).with_regex_arg(0, RegexFlavor::Default),
+    |context, receiver, args| match (receiver, &args[0]) {
+      (Value::String(receiver), Value::String(pattern)) => context
+        .precompiled_regex_is_match(RegexFlavor::Default, pattern, receiver)
+        .map(Value::Bool),
+      (Value::String(_), other) => Err(online_dsl_forge::EvalError::new(
+        format!(
+          "matches requires string argument, got {}",
+          other.type_name()
+        ),
+        context.span(),
+      )),
+      (other, _) => Err(online_dsl_forge::EvalError::new(
+        format!(
+          "matches requires string receiver, got {}",
+          other.type_name()
+        ),
+        context.span(),
+      )),
+    },
+  );
+  registry.register_method_capability_with_context(
+    CapabilityMeta::method("anyEntryMatches", 2)
+      .with_regex_arg(0, RegexFlavor::HeaderName)
+      .with_regex_arg(1, RegexFlavor::Default),
+    |context, receiver, args| {
+      let (Value::String(key_pattern), Value::String(value_pattern)) = (&args[0], &args[1]) else {
+        return Err(online_dsl_forge::EvalError::new(
+          "anyEntryMatches requires string regex arguments",
+          context.span(),
+        ));
+      };
+      let Value::Object(values) = receiver else {
+        return Err(online_dsl_forge::EvalError::new(
+          format!(
+            "anyEntryMatches requires object receiver, got {}",
+            receiver.type_name()
+          ),
+          context.span(),
+        ));
+      };
+      let key_regex = context.require_precompiled_regex(RegexFlavor::HeaderName, key_pattern)?;
+      let value_regex = context.require_precompiled_regex(RegexFlavor::Default, value_pattern)?;
+      Ok(Value::Bool(values.iter().any(|(key, value)| {
+        key_regex.is_match(key)
+          && matches!(value, Value::String(value) if value_regex.is_match(value))
+      })))
+    },
+  );
+  registry
 }

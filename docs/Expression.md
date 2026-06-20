@@ -43,6 +43,13 @@ Host functions, methods, and operator overrides may also be constrained by
 semantic capability metadata such as phase availability, body access, regex
 policy, cost, determinism, and side-effect freedom.
 
+Capabilities that declare regex arguments can be evaluated by context-aware
+runtime handlers. Strict profiles require those regex arguments to be string
+literals and precompile them during semantic analysis; runtime handlers then use
+the verified precompiled cache through `RuntimeCallContext`. If a handler asks
+for a precompiled regex that was not admitted during analysis, evaluation fails
+closed.
+
 ## Operators
 
 Precedence from highest to lowest:

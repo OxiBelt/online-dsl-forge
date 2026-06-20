@@ -262,6 +262,19 @@ impl CompiledRegexCache {
     Ok(())
   }
 
+  pub fn get(&self, flavor: RegexFlavor, pattern: &str) -> Option<&Regex> {
+    match flavor {
+      RegexFlavor::Default => self.default.get(pattern),
+      RegexFlavor::HeaderName => self.header_name.get(pattern),
+    }
+  }
+
+  pub fn is_match(&self, flavor: RegexFlavor, pattern: &str, haystack: &str) -> Option<bool> {
+    self
+      .get(flavor, pattern)
+      .map(|regex| regex.is_match(haystack))
+  }
+
   pub fn len(&self) -> usize {
     self.default.len() + self.header_name.len()
   }

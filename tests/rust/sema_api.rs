@@ -1,7 +1,8 @@
 use online_dsl_forge::parse_expression;
 use online_dsl_forge::sema::{
   Analyzer, BodyAccess, CapabilityKind, CapabilityMeta, CapabilityTicket, CostModel,
-  ExpressionFunctionScope, Phase, RegexFlavor, RuntimeSchema, SecurityProfile, VerifiedExprKindRef,
+  ExpressionFunctionScope, Phase, RegexFlavor, RegexPolicy, RuntimeSchema, SecurityProfile,
+  VerifiedExprKindRef,
 };
 
 #[test]
@@ -257,6 +258,75 @@ fn strict_regex_policy_precompiles_literal_regex() {
 
   assert_eq!(verified.regex_literals().len(), 1);
   assert_eq!(verified.regex_cache().len(), 1);
+}
+
+#[test]
+fn regex_forbid_policy_rejects_declared_regex_arguments() {
+  let ast = parse_expression("name.matches(\"^pi\")").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("name").add_method_capability(
+    CapabilityMeta::method("matches", 1).with_regex_arg(0, RegexFlavor::Default),
+  );
+  let mut profile = SecurityProfile::generic_safe();
+  profile.default_regex_policy = RegexPolicy::Forbid;
+
+  let error = Analyzer::new(profile)
+    .analyze(&ast, &schema)
+    .expect_err("forbidden regex should fail");
+
+  assert!(
+    error
+      .to_string()
+      .contains("regex arguments are forbidden by profile")
+  );
+}
+
+#[test]
+fn invalid_literal_regex_fails_during_analysis() {
+  let ast = parse_expression("Request.Body.Text.matches(\"[\")").expect("expression should parse");
+  let schema = RuntimeSchema::waf();
+
+  let error = Analyzer::new(SecurityProfile::waf_request())
+    .analyze(&ast, &schema)
+    .expect_err("invalid regex should fail");
+
+  assert!(error.to_string().contains("invalid regex pattern"));
+}
+
+#[test]
+fn duplicate_regex_literals_share_one_compiled_cache_entry() {
+  let ast = parse_expression("name.matches(\"^pi\") || name.matches(\"^pi\")")
+    .expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("name").add_method_capability(
+    CapabilityMeta::method("matches", 1).with_regex_arg(0, RegexFlavor::Default),
+  );
+
+  let verified = Analyzer::new(SecurityProfile::waf_request())
+    .analyze(&ast, &schema)
+    .expect("duplicate literals should analyze");
+
+  assert_eq!(verified.regex_literals().len(), 2);
+  assert_eq!(verified.regex_cache().len(), 1);
+}
+
+#[test]
+fn header_name_regex_flavor_precompiles_case_insensitive_regex() {
+  let ast =
+    parse_expression("headers.anyNameMatches(\"content-type\")").expect("expression should parse");
+  let mut schema = RuntimeSchema::waf();
+  schema.add_variable("headers");
+
+  let verified = Analyzer::new(SecurityProfile::waf_request())
+    .analyze(&ast, &schema)
+    .expect("header-name regex should analyze");
+
+  assert_eq!(
+    verified
+      .regex_cache()
+      .is_match(RegexFlavor::HeaderName, "content-type", "CONTENT-TYPE"),
+    Some(true)
+  );
 }
 
 #[test]
