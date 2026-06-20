@@ -18,6 +18,8 @@ and CLI tooling.
   spans, and formatter.
 - Runtime schemas, security profiles, capability metadata, body-need inference,
   regex admission, and verified IR.
+- In-memory rulepack manifest rendering with resolver-backed referenced file
+  expansion for host-provided local, remote, or blob-backed bundles.
 - Stable span-carrying AST with `serde` serialization.
 - Deterministic canonical expression formatter.
 - Compile-time validation against host-provided runtime schemas and security
@@ -63,6 +65,7 @@ cargo run --manifest-path source/Cargo.toml --bin online-dsl-forgectl -- \
 ```text
 source/                       Single publishable Rust library and CLI crate
 source/src/parser/            Parser, AST, diagnostics, spans, and formatter modules
+source/src/rulepack_render/   In-memory rulepack manifest rendering and file resolution APIs
 source/src/sema/              Runtime schemas, analyzer, profile model, and verified IR
 source/src/                   Runtime, values, re-exports, compile API, and CLI
 tests/rust/                   Repository-level Rust integration tests

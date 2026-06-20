@@ -172,6 +172,45 @@ Compiled expressions are validation artifacts. Host applications should parse
 and analyze expressions through `online-dsl-forge`; they should not treat
 serialized ASTs or external data as already verified runtime input.
 
+## Rulepack Rendering
+
+The `rulepack_render` module provides in-memory rendering for schema version 2
+rulepack manifests. It is a library boundary for policy packaging and does not
+grant the expression runtime filesystem, network, callback, or external I/O
+capabilities.
+
+The render pipeline is deterministic:
+
+- parse TOML and decode known rulepack tables with unknown fields rejected
+- validate manifest metadata, variables, bindings, profiles, overrides,
+  exceptions, provenance, and rule names
+- resolve declared variables and binding render targets from
+  `RulepackRenderOptions::variables`, falling back to declared variable
+  defaults
+- replace `{{name}}` placeholders in manifest strings
+- apply manifest overrides, then local overrides
+- apply mode override and optional force-mode rule mutation
+- append local exceptions to the manifest
+- optionally pin resolved variable defaults and strip `bindings`, `profiles`,
+  and `overrides` for installable output
+- apply source commit and provenance overrides
+- render pretty TOML
+
+`render_rulepack_bundle` expands referenced rule and group files through a
+caller-provided `FileResolver`. The built-in `MemoryFileResolver` and
+`BlobFileResolver` are in-memory helpers for tests, remote bundles, database
+artifacts, or host-managed file loading. The core library validates logical
+paths before resolver calls: paths must be relative UTF-8 paths, must not use
+absolute roots, `.` or `..`, backslashes, empty components, or control bytes,
+and must end in `.oxirule.toml` for rules or `.oxirule-group.toml` for group
+files.
+
+The renderer fails closed on malformed TOML, unsupported schema versions,
+unknown render variables, missing required variables or bindings, invalid
+`cidr` or `rate` values, invalid provenance digests, unmatched overrides,
+ambiguous action overrides, unsafe referenced paths, missing resolver content,
+and exceptions that do not match an active non-stream rule.
+
 ## CLI
 
 `online-dsl-forgectl` provides:

@@ -1,8 +1,9 @@
 use online_dsl_forge::sema::RegexLiteral;
 use online_dsl_forge::{
-  Analyzer, BodyAccess, CompileOptions, EvalLimits, MapRuntime, RuntimeSchema, SecurityProfile,
+  Analyzer, BodyAccess, CompileOptions, EvalLimits, MapRuntime, RulepackException,
+  RulepackModeOverride, RulepackOverride, RulepackRenderOptions, RuntimeSchema, SecurityProfile,
   VerifiedExprKindRef, VerifiedExpression, compile_expression, evaluate, format_expression,
-  parse_expression,
+  parse_expression, render_rulepack_for_install,
 };
 use serde_json::{Value as JsonValue, json};
 
@@ -180,7 +181,7 @@ fn verified_ir_summary_matches_golden_fixtures() {
 }
 
 #[test]
-fn deferred_rulepack_render_fixtures_are_well_formed() {
+fn rulepack_render_matches_golden_fixtures() {
   for case in fixture_cases(RULEPACK_RENDER_DEFERRED) {
     let id = case_id(&case);
     let origin = required_str(&case, "origin");
@@ -197,6 +198,8 @@ fn deferred_rulepack_render_fixtures_are_well_formed() {
       input.contains("[rulepack]"),
       "{id}: deferred rulepack fixture should include a manifest"
     );
+    let actual = render_rulepack_for_install(input, source, rulepack_options(case.get("options")))
+      .unwrap_or_else(|error| panic!("{id}: rulepack should render, got {error}"));
 
     let must_contain = required_array(expected, "must_contain");
     assert!(
@@ -204,15 +207,28 @@ fn deferred_rulepack_render_fixtures_are_well_formed() {
       "{id}: rulepack fixture should lock at least one rendered invariant"
     );
     assert_all_strings(id, must_contain, "must_contain");
+    for value in must_contain {
+      let value = value.as_str().expect("must_contain entries are strings");
+      assert!(
+        actual.contains(value),
+        "{id}: rendered rulepack should contain {value:?}\n{actual}"
+      );
+    }
 
     if let Some(must_not_contain) = expected.get("must_not_contain") {
-      assert_all_strings(
-        id,
-        must_not_contain
-          .as_array()
-          .unwrap_or_else(|| panic!("{id}: must_not_contain must be an array")),
-        "must_not_contain",
-      );
+      let must_not_contain = must_not_contain
+        .as_array()
+        .unwrap_or_else(|| panic!("{id}: must_not_contain must be an array"));
+      assert_all_strings(id, must_not_contain, "must_not_contain");
+      for value in must_not_contain {
+        let value = value
+          .as_str()
+          .expect("must_not_contain entries are strings");
+        assert!(
+          !actual.contains(value),
+          "{id}: rendered rulepack should not contain {value:?}\n{actual}"
+        );
+      }
     }
   }
 }
@@ -306,6 +322,44 @@ fn assert_all_strings(id: &str, values: &[JsonValue], field: &str) {
       .unwrap_or_else(|| panic!("{id}: {field} entries must be strings"));
     assert!(!item.is_empty(), "{id}: {field} entries must not be empty");
   }
+}
+
+fn rulepack_options(value: Option<&JsonValue>) -> RulepackRenderOptions {
+  let mut options = RulepackRenderOptions::default();
+  let Some(value) = value else {
+    return options;
+  };
+  if let Some(variables) = value.get("variables").and_then(JsonValue::as_object) {
+    options.variables = variables
+      .iter()
+      .map(|(name, value)| {
+        (
+          name.clone(),
+          value
+            .as_str()
+            .unwrap_or_else(|| panic!("rulepack variable {name} must be a string"))
+            .to_string(),
+        )
+      })
+      .collect();
+  }
+  if let Some(mode_override) = value.get("mode_override") {
+    options.mode_override = Some(
+      serde_json::from_value::<RulepackModeOverride>(mode_override.clone())
+        .expect("mode_override fixture should decode"),
+    );
+  }
+  if let Some(local_overrides) = value.get("local_overrides") {
+    options.local_overrides =
+      serde_json::from_value::<Vec<RulepackOverride>>(local_overrides.clone())
+        .expect("local_overrides fixture should decode");
+  }
+  if let Some(local_exceptions) = value.get("local_exceptions") {
+    options.local_exceptions =
+      serde_json::from_value::<Vec<RulepackException>>(local_exceptions.clone())
+        .expect("local_exceptions fixture should decode");
+  }
+  options
 }
 
 fn assert_body_need(id: &str, need: &str) {

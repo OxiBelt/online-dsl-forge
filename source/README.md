@@ -14,6 +14,9 @@ dynamic runtime registry, and CLI tooling in one publishable package.
 - Handwritten lexer, recursive-descent expression parser, span-carrying AST,
   diagnostics, and formatter.
 - Semantic analyzer, runtime schemas, security profiles, and verified IR.
+- In-memory rulepack rendering for schema v2 manifests, variable pinning,
+  local overrides, local exceptions, provenance stamping, and resolver-backed
+  referenced rule/group files.
 - Compile-time validation against host-provided runtime schemas and security
   profiles.
 - Bounded in-memory evaluation with a dynamic variable, function, method, and
@@ -57,6 +60,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let value = evaluate(&compiled, &runtime, EvalLimits::default())?;
 
   assert_eq!(value, Value::Bool(true));
+  Ok(())
+}
+```
+
+Render a rulepack bundle without granting the library filesystem or network
+access:
+
+```rust
+use std::collections::BTreeMap;
+
+use online_dsl_forge::{
+  MemoryFileResolver, RulepackRenderOptions, render_rulepack_bundle,
+};
+
+fn render() -> Result<(), Box<dyn std::error::Error>> {
+  let manifest = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[variables]]
+name = "route_name"
+type = "string"
+required = true
+
+[[rules]]
+name = "login"
+phase = "request"
+priority = 100
+path = "rules/login.oxirule.toml"
+"#;
+  let resolver = MemoryFileResolver::new().with_file(
+    "rules/login.oxirule.toml",
+    "when = \"Context.RouteName == '{{route_name}}'\"\n",
+  );
+  let bundle = render_rulepack_bundle(
+    manifest,
+    "example rulepack",
+    RulepackRenderOptions {
+      variables: BTreeMap::from([("route_name".to_string(), "app-root".to_string())]),
+      pin_variables: true,
+      ..RulepackRenderOptions::default()
+    },
+    &resolver,
+  )?;
+
+  assert!(bundle.manifest.contains("default = \"app-root\""));
+  assert!(bundle.files[0].content.contains("app-root"));
   Ok(())
 }
 ```
