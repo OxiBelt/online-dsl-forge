@@ -2,6 +2,7 @@ mod capability_check;
 mod context;
 mod defaults;
 mod operators;
+mod pattern_sets;
 
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
@@ -21,6 +22,10 @@ pub use defaults::default_registry;
 use operators::{
   add_values, binary_op_from_name, compare_values, expect_bool, numeric_arithmetic,
   unary_op_from_name,
+};
+pub use pattern_sets::{
+  RuntimePatternSetConfig, RuntimePatternSetError, RuntimePatternSetKind, RuntimePatternSetLimits,
+  RuntimePatternSets, oxirule_pattern_set_registry, register_oxirule_pattern_set_methods,
 };
 
 type FunctionHandler =

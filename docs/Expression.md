@@ -117,3 +117,8 @@ The OxiRule WAF schema exposes lowerCamelCase method names such as
 `startsWith`, `lowerAscii`, `anyValueMatches`, and `directPeerIpNetworkPrefix`,
 plus WAF roots such as `Context`, `Request`, `DynamicPolicy`, `Response`, and
 `Stream`.
+
+Pattern-set helpers use receiver-method syntax such as
+`Request.Http.Path.containsAny("blocked-paths")` and
+`Request.Http.Path.matchesAny("blocked-paths")`. The compatibility schema does
+not register the stale `PatternSets.contains(name, value)` helper form.

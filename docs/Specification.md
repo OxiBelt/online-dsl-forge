@@ -141,6 +141,12 @@ compatibility profiles use the WAF phase/body/cost limits but keep
 arguments continue to validate. The stricter `waf_*` profiles remain
 literal-regex-only.
 
+OxiRule pattern-set evaluation is host-supplied runtime behavior. Hosts can
+register compiled pattern sets with the runtime registry helpers and use
+receiver-method expressions such as `Request.Http.Path.containsAny("set")`.
+`RuntimeSchema::oxirule_waf()` does not register the stale
+`PatternSets.contains(name, value)` helper alias.
+
 `SecurityProfile::generic_safe()` is the default non-WAF embedding profile. It
 keeps `RegexPolicy::DynamicWithBudget` for compatibility, requires
 deterministic and side-effect-free capabilities, fails closed, and uses modest

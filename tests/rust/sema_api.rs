@@ -899,6 +899,43 @@ fn oxirule_compat_profile_allows_dynamic_regex_arguments() {
 }
 
 #[test]
+fn oxirule_schema_accepts_contains_any_pattern_set_method() {
+  let ast = parse_expression("Request.Http.Path.containsAny('blocked-paths')")
+    .expect("expression should parse");
+
+  let verified = Analyzer::new(SecurityProfile::oxirule_waf_request())
+    .with_dialect(ExpressionDialect::OxiRuleV1)
+    .analyze(&ast, &RuntimeSchema::oxirule_waf())
+    .expect("OxiRule pattern-set method should analyze");
+
+  assert!(
+    verified
+      .required_capabilities()
+      .contains(&CapabilityTicket::new(
+        CapabilityKind::Method,
+        "containsAny",
+        1
+      ))
+  );
+  assert_eq!(verified.body_need().request, BodyAccess::None);
+}
+
+#[test]
+fn oxirule_schema_rejects_stale_pattern_sets_contains_call() {
+  let ast = parse_expression("PatternSets.contains('blocked-paths', Request.Http.Path)")
+    .expect("expression should parse");
+
+  let error = Analyzer::new(SecurityProfile::oxirule_waf_request())
+    .with_dialect(ExpressionDialect::OxiRuleV1)
+    .analyze(&ast, &RuntimeSchema::oxirule_waf())
+    .expect_err("stale PatternSets helper should be rejected");
+  let message = error.to_string();
+
+  assert!(message.contains("unknown variable PatternSets"));
+  assert!(message.contains("method contains does not accept 2 arguments"));
+}
+
+#[test]
 fn oxirule_body_methods_preserve_body_access_metadata() {
   for expression in [
     "Request.Http.Body.contains(\"secret\")",

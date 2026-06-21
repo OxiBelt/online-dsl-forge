@@ -32,6 +32,8 @@ pub use rulepack_render::{
 };
 pub use runtime::{
   DynamicRegistry, EvalError, EvalLimits, MapRuntime, RuntimeCallContext, RuntimeContext,
-  default_registry, evaluate, evaluate_verified,
+  RuntimePatternSetConfig, RuntimePatternSetError, RuntimePatternSetKind, RuntimePatternSetLimits,
+  RuntimePatternSets, default_registry, evaluate, evaluate_verified, oxirule_pattern_set_registry,
+  register_oxirule_pattern_set_methods,
 };
 pub use value::Value;

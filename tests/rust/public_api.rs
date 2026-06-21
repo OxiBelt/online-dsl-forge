@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use online_dsl_forge::{
   Analyzer, BinaryOp, CapabilityMeta, CompileOptions, CostModel, DynamicRegistry, EvalLimits,
-  ExpressionFunctionMode, MapRuntime, RegexFlavor, RuntimeSchema, SecurityProfile, Value,
-  compile_expression, evaluate, evaluate_verified, format_expression, parse_expression,
+  ExpressionDialect, ExpressionFunctionMode, MapRuntime, RegexFlavor, RuntimePatternSetConfig,
+  RuntimePatternSets, RuntimeSchema, SecurityProfile, Value, compile_expression, evaluate,
+  evaluate_verified, format_expression, oxirule_pattern_set_registry, parse_expression,
 };
 
 #[test]
@@ -280,6 +281,165 @@ fn context_aware_method_uses_multiple_regex_flavors() {
     .expect("multi-regex method should evaluate");
 
   assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn oxirule_pattern_set_registry_evaluates_contains_any() {
+  let pattern_sets = RuntimePatternSets::compile([RuntimePatternSetConfig::contains(
+    "blocked-paths",
+    ["/admin", "/blocked"],
+  )])
+  .expect("pattern set should compile");
+
+  let matched = evaluate_oxirule_path(
+    "/admin/settings",
+    "Request.Http.Path.containsAny('blocked-paths')",
+    pattern_sets.clone(),
+  )
+  .expect("containsAny should evaluate");
+  let missed = evaluate_oxirule_path(
+    "/public",
+    "Request.Http.Path.containsAny('blocked-paths')",
+    pattern_sets,
+  )
+  .expect("containsAny should evaluate");
+
+  assert_eq!(matched, Value::Bool(true));
+  assert_eq!(missed, Value::Bool(false));
+}
+
+#[test]
+fn oxirule_pattern_set_registry_evaluates_matches_any() {
+  let pattern_sets = RuntimePatternSets::compile([RuntimePatternSetConfig::regex(
+    "admin-paths",
+    [r"^/admin(/|$)"],
+  )])
+  .expect("regex pattern set should compile");
+
+  let value = evaluate_oxirule_path(
+    "/admin/settings",
+    "Request.Http.Path.matchesAny('admin-paths')",
+    pattern_sets,
+  )
+  .expect("matchesAny should evaluate");
+
+  assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn oxirule_pattern_set_registry_fails_closed_for_unknown_set() {
+  let pattern_sets =
+    RuntimePatternSets::compile(Vec::new()).expect("empty pattern sets should compile");
+  let error = evaluate_oxirule_path(
+    "/admin",
+    "Request.Http.Path.containsAny('missing')",
+    pattern_sets,
+  )
+  .expect_err("unknown pattern set should fail closed");
+
+  assert!(
+    error
+      .to_string()
+      .contains("unknown runtime pattern set missing")
+  );
+}
+
+#[test]
+fn runtime_pattern_sets_reject_invalid_regex() {
+  let error = RuntimePatternSets::compile([RuntimePatternSetConfig::regex("bad", ["["])])
+    .expect_err("invalid regex pattern should fail to compile");
+
+  assert!(
+    error
+      .to_string()
+      .contains("runtime pattern set bad contains invalid regex pattern")
+  );
+}
+
+#[test]
+fn pattern_set_methods_match_string_array_receivers() {
+  let pattern_sets = RuntimePatternSets::compile([RuntimePatternSetConfig::contains(
+    "blocked-values",
+    ["secret"],
+  )])
+  .expect("pattern set should compile");
+  let registry = oxirule_pattern_set_registry(pattern_sets);
+  let mut variables = BTreeMap::new();
+  variables.insert(
+    "items".to_string(),
+    Value::Array(vec![
+      Value::String("public".to_string()),
+      Value::String("secret-token".to_string()),
+    ]),
+  );
+  let runtime = MapRuntime::new(variables, registry);
+  let ast =
+    parse_expression("items.containsAny('blocked-values')").expect("expression should parse");
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &runtime.schema())
+    .expect("array receiver should analyze");
+
+  let value =
+    evaluate_verified(&verified, &runtime, EvalLimits::default()).expect("array should evaluate");
+
+  assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn pattern_set_methods_reject_non_string_array_items() {
+  let pattern_sets = RuntimePatternSets::compile([RuntimePatternSetConfig::contains(
+    "blocked-values",
+    ["secret"],
+  )])
+  .expect("pattern set should compile");
+  let registry = oxirule_pattern_set_registry(pattern_sets);
+  let mut variables = BTreeMap::new();
+  variables.insert(
+    "items".to_string(),
+    Value::Array(vec![
+      Value::String("secret-token".to_string()),
+      Value::Int(7),
+    ]),
+  );
+  let runtime = MapRuntime::new(variables, registry);
+  let ast =
+    parse_expression("items.containsAny('blocked-values')").expect("expression should parse");
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &runtime.schema())
+    .expect("array receiver should analyze");
+
+  let error = evaluate_verified(&verified, &runtime, EvalLimits::default())
+    .expect_err("non-string array item should fail closed");
+
+  assert!(
+    error
+      .to_string()
+      .contains("pattern-set methods require string array items")
+  );
+}
+
+fn evaluate_oxirule_path(
+  path: &str,
+  expression: &str,
+  pattern_sets: RuntimePatternSets,
+) -> Result<Value, online_dsl_forge::EvalError> {
+  let ast = parse_expression(expression).expect("expression should parse");
+  let verified = Analyzer::new(SecurityProfile::oxirule_waf_request())
+    .with_dialect(ExpressionDialect::OxiRuleV1)
+    .analyze(&ast, &RuntimeSchema::oxirule_waf())
+    .expect("OxiRule expression should analyze");
+  let runtime = request_path_runtime(path, oxirule_pattern_set_registry(pattern_sets));
+  evaluate_verified(&verified, &runtime, EvalLimits::default())
+}
+
+fn request_path_runtime(path: &str, registry: DynamicRegistry) -> MapRuntime {
+  let mut http = BTreeMap::new();
+  http.insert("Path".to_string(), Value::String(path.to_string()));
+  let mut request = BTreeMap::new();
+  request.insert("Http".to_string(), Value::Object(http));
+  let mut variables = BTreeMap::new();
+  variables.insert("Request".to_string(), Value::Object(request));
+  MapRuntime::new(variables, registry)
 }
 
 fn regex_registry() -> DynamicRegistry {
