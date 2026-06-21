@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use online_dsl_forge::{
-  BlobFileResolver, BlobStore, MemoryFileResolver, RulepackRenderOptions,
-  referenced_rulepack_files, render_rulepack_bundle, render_rulepack_for_install,
+  BlobFileResolver, BlobStore, MemoryFileResolver, RulepackActionSelector, RulepackOverride,
+  RulepackOverrideSelector, RulepackRenderOptions, referenced_rulepack_files,
+  render_rulepack_bundle, render_rulepack_for_install,
 };
 
 #[test]
@@ -122,6 +123,66 @@ fn render_rejects_unknown_and_invalid_variables() {
   assert!(invalid_cidr.to_string().contains("valid CIDR"));
 }
 
+#[test]
+fn render_rejects_non_finite_rate_variables() {
+  let finite = render_rulepack_for_install(
+    &manifest_with_rate_variable(),
+    "test rulepack",
+    RulepackRenderOptions {
+      variables: BTreeMap::from([("limit".to_string(), "5r/m".to_string())]),
+      ..RulepackRenderOptions::default()
+    },
+  )
+  .expect("finite positive rate should render");
+  assert!(finite.contains("rate = \"5r/m\""));
+
+  for value in ["0r/s", "-1r/s"] {
+    let error = render_rulepack_for_install(
+      &manifest_with_rate_variable(),
+      "test rulepack",
+      RulepackRenderOptions {
+        variables: BTreeMap::from([("limit".to_string(), value.to_string())]),
+        ..RulepackRenderOptions::default()
+      },
+    )
+    .expect_err("nonpositive rate should fail closed");
+
+    assert!(error.to_string().contains("greater than 0"));
+  }
+
+  for value in ["NaNr/s", "infr/m", "infinityr/h", "1e309r/s"] {
+    let error = render_rulepack_for_install(
+      &manifest_with_rate_variable(),
+      "test rulepack",
+      RulepackRenderOptions {
+        variables: BTreeMap::from([("limit".to_string(), value.to_string())]),
+        ..RulepackRenderOptions::default()
+      },
+    )
+    .expect_err("non-finite rate variable should fail closed");
+
+    assert!(error.to_string().contains("rate amount must be finite"));
+  }
+}
+
+#[test]
+fn render_rejects_non_finite_rate_overrides() {
+  for value in ["NaNr/s", "infr/m", "infinityr/h", "1e309r/s"] {
+    let error = render_rulepack_for_install(
+      &manifest_with_rate_variable(),
+      "test rulepack",
+      RulepackRenderOptions {
+        variables: BTreeMap::from([("limit".to_string(), "5r/m".to_string())]),
+        local_overrides: vec![rate_override(value)],
+        ..RulepackRenderOptions::default()
+      },
+    )
+    .expect_err("non-finite rate override should fail closed");
+
+    assert!(error.to_string().contains("rate amount must be finite"));
+  }
+}
+
 fn manifest_with_paths() -> &'static str {
   r#"[rulepack]
 schema_version = 2
@@ -168,4 +229,57 @@ path = "rules/login.oxirule.toml"
       "string"
     }
   )
+}
+
+fn manifest_with_rate_variable() -> String {
+  r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+
+[[variables]]
+name = "limit"
+type = "rate"
+required = true
+
+[[rules]]
+name = "login"
+id = "demo.login"
+tags = ["surface:login"]
+phase = "request"
+priority = 100
+content = '''
+when = "true"
+
+[[actions]]
+type = "rate_limit"
+name = "login"
+key = "client_ip"
+rate = "{{limit}}"
+burst = 5
+'''
+"#
+  .to_string()
+}
+
+fn rate_override(rate: &str) -> RulepackOverride {
+  RulepackOverride {
+    selector: RulepackOverrideSelector {
+      rulepack: None,
+      tags: vec!["surface:login".to_string()],
+      rule_id: None,
+      rule_name: None,
+    },
+    action: Some(RulepackActionSelector {
+      action_type: "rate_limit".to_string(),
+      name: Some("login".to_string()),
+    }),
+    mode: None,
+    priority: None,
+    enabled: None,
+    rate: Some(rate.to_string()),
+    burst: None,
+    status: None,
+    body: None,
+  }
 }

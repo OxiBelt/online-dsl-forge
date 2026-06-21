@@ -90,6 +90,9 @@ pub(crate) fn validate_rate(value: &str) -> RenderResult<()> {
   let amount = amount
     .parse::<f64>()
     .map_err(|_| crate::rulepack_render::RulepackRenderError::new("invalid rate amount"))?;
+  if !amount.is_finite() {
+    return fail("rate amount must be finite");
+  }
   if amount <= 0.0 {
     return fail("rate amount must be greater than 0");
   }
