@@ -85,7 +85,8 @@ and security profile. Validation covers:
 - WAF profile restrictions such as request-phase rejection of `Response` and
   stream-phase rejection of `Request.Body`
 - mitigation-field restrictions that reject `Request.Body`, `Response.Body`,
-  or `Stream.Payload` access, including through expression functions
+  `Stream.Payload`, or schema-declared payload body access, including through
+  expression functions
 - regex admission policy and literal regex precompilation for strict profiles
 - optional profile-level body-access limits
 - static AST node, call-depth, and cost limits

@@ -166,7 +166,7 @@ impl<'a> AnalyzeState<'a> {
       ));
     }
     if matches!(self.analyzer.profile.id, SecurityProfileId::MitigationField)
-      && analysis.mitigation_payload
+      && (analysis.mitigation_payload || analysis.body_need.reads_payload())
     {
       self.diagnostics.push(Diagnostic::new(
         "MitigationField cannot read request, response, or stream body bytes",

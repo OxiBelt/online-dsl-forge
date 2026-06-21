@@ -609,6 +609,48 @@ fn mitigation_rejects_body_object_passed_through_function() {
 }
 
 #[test]
+fn mitigation_rejects_host_declared_payload_body_path() {
+  let ast =
+    parse_expression("Context.Body.Text.contains(\"secret\")").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("Context")
+    .add_body_path(
+      ["Context", "Body", "Text"],
+      BodyTarget::Request,
+      BodyAccess::PrefixBytes,
+    )
+    .add_method("contains", 1);
+
+  let error = Analyzer::new(SecurityProfile::mitigation_field(Phase::Request))
+    .analyze(&ast, &schema)
+    .expect_err("mitigation should reject host-declared payload body access");
+
+  assert!(
+    error
+      .to_string()
+      .contains("MitigationField cannot read request, response, or stream body bytes")
+  );
+}
+
+#[test]
+fn mitigation_allows_host_declared_size_only_body_path() {
+  let ast = parse_expression("Context.Body.Size > 0").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("Context").add_body_path(
+    ["Context", "Body", "Size"],
+    BodyTarget::Request,
+    BodyAccess::SizeOnly,
+  );
+
+  let verified = Analyzer::new(SecurityProfile::mitigation_field(Phase::Request))
+    .analyze(&ast, &schema)
+    .expect("mitigation should allow host-declared size-only body access");
+
+  assert_eq!(verified.body_need().request, BodyAccess::SizeOnly);
+}
+
+#[test]
 fn stream_payload_need_is_tracked_separately() {
   let ast =
     parse_expression("Stream.Payload.Text.contains(\"secret\")").expect("expression should parse");
