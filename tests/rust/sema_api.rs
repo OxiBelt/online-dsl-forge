@@ -792,6 +792,23 @@ fn oxirule_compat_profile_allows_dynamic_regex_arguments() {
 }
 
 #[test]
+fn oxirule_body_methods_preserve_body_access_metadata() {
+  for expression in [
+    "Request.Http.Body.contains(\"secret\")",
+    "Request.Http.Body.matches(\"secret\")",
+  ] {
+    let ast = parse_expression(expression).expect("expression should parse");
+
+    let verified = Analyzer::new(SecurityProfile::oxirule_waf_request())
+      .with_dialect(ExpressionDialect::OxiRuleV1)
+      .analyze(&ast, &RuntimeSchema::oxirule_waf())
+      .expect("OxiRule body methods should analyze");
+
+    assert_eq!(verified.body_need().request, BodyAccess::PrefixBytes);
+  }
+}
+
+#[test]
 fn oxirule_schema_tracks_http_body_aliases_and_camel_case_methods() {
   let ast = parse_expression(
     "Request.Http.Body.Text.contains(\"secret\") && Request.Http.Path.startsWith(\"/admin\")",
@@ -813,6 +830,23 @@ fn oxirule_schema_tracks_http_body_aliases_and_camel_case_methods() {
         1
       ))
   );
+}
+
+#[test]
+fn oxirule_call_frame_functions_preserve_returned_body_origin() {
+  let ast = parse_expression("identity(Request.Http.Body).Text.contains(\"secret\")")
+    .expect("expression should parse");
+  let function = parse_expression("body").expect("function should parse");
+  let mut schema = RuntimeSchema::oxirule_waf();
+  schema.add_expression_function("identity", ["body"], function);
+
+  let verified = Analyzer::new(SecurityProfile::oxirule_waf_request())
+    .with_dialect(ExpressionDialect::OxiRuleV1)
+    .with_expression_function_mode(ExpressionFunctionMode::CallFrame)
+    .analyze(&ast, &schema)
+    .expect("call-frame mode should preserve body origin for outer member access");
+
+  assert_eq!(verified.body_need().request, BodyAccess::PrefixBytes);
 }
 
 #[test]

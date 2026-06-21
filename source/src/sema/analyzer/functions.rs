@@ -146,6 +146,8 @@ impl<'a> AnalyzeState<'a> {
     let body = self.analyze_expression(&function.expression, depth + 1);
     self.local_bindings.pop();
     self.active_functions.pop();
+    let origin = body.origin;
+    let path = body.path.clone();
 
     ExprAnalysis::new(
       VerifiedExpression::new(
@@ -157,8 +159,8 @@ impl<'a> AnalyzeState<'a> {
         },
         span,
       ),
-      None,
-      None,
+      origin,
+      path,
       args_analysis.body_need.merge(body.body_need),
       args_analysis.nodes + body.nodes + 1,
       args_analysis.cost + body.cost + 1,

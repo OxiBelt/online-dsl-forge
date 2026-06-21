@@ -66,11 +66,15 @@ impl RuntimeSchema {
 
   pub fn add_oxirule_string_methods(&mut self) -> &mut Self {
     self
-      .add_method_capability(CapabilityMeta::method("contains", 1))
+      .add_method_capability(
+        CapabilityMeta::method("contains", 1).with_body_access(BodyAccess::PrefixBytes),
+      )
       .add_method_capability(CapabilityMeta::method("startsWith", 1))
       .add_method_capability(CapabilityMeta::method("endsWith", 1))
       .add_method_capability(
-        CapabilityMeta::method("matches", 1).with_regex_arg(0, RegexFlavor::Default),
+        CapabilityMeta::method("matches", 1)
+          .with_body_access(BodyAccess::PrefixBytes)
+          .with_regex_arg(0, RegexFlavor::Default),
       )
       .add_method_capability(CapabilityMeta::method("lowerAscii", 0))
       .add_method_capability(CapabilityMeta::method("upperAscii", 0))
