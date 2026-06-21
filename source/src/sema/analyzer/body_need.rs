@@ -6,6 +6,18 @@ use super::AnalyzeState;
 use super::support::ObjectOrigin;
 
 impl<'a> AnalyzeState<'a> {
+  pub(super) fn merge_body_access_for_path(
+    &self,
+    body_need: &mut BodyNeedSummary,
+    path: Option<&[String]>,
+  ) {
+    if let Some(path) = path
+      && let Some((target, access)) = self.schema.body_access_for_path(path)
+    {
+      body_need.merge_target(target, access);
+    }
+  }
+
   pub(super) fn merge_body_access_for_origin(
     &self,
     body_need: &mut BodyNeedSummary,
@@ -36,6 +48,27 @@ impl<'a> AnalyzeState<'a> {
         let _ = span;
       }
     }
+  }
+
+  pub(super) fn merge_body_access_for_exposed_origin(
+    &self,
+    body_need: &mut BodyNeedSummary,
+    origin: Option<ObjectOrigin>,
+  ) {
+    let Some(target) = origin.and_then(ObjectOrigin::body_target) else {
+      return;
+    };
+    body_need.merge_target(target, BodyAccess::PrefixBytes);
+  }
+
+  pub(super) fn body_need_for_consumed_analysis(
+    &self,
+    body_need: BodyNeedSummary,
+    origin: Option<ObjectOrigin>,
+  ) -> BodyNeedSummary {
+    let mut consumed_body_need = body_need;
+    self.merge_body_access_for_exposed_origin(&mut consumed_body_need, origin);
+    consumed_body_need
   }
 
   pub(super) fn merge_body_access_for_method(

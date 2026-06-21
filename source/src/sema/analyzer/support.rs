@@ -77,6 +77,7 @@ pub(super) struct ArgsAnalysis {
   pub exprs: Vec<VerifiedExpression>,
   pub bindings: Vec<LocalBinding>,
   pub body_need: BodyNeedSummary,
+  pub consumed_body_need: BodyNeedSummary,
   pub mitigation_payload: bool,
   pub nodes: usize,
   pub cost: u64,

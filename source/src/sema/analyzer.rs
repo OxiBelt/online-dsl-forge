@@ -87,7 +87,8 @@ impl Analyzer {
     let mut state = AnalyzeState::new(self, schema);
     self.dialect.validate(expression, &mut state.diagnostics);
     state.validate_function_graph();
-    let analysis = state.analyze_expression(expression, 0);
+    let mut analysis = state.analyze_expression(expression, 0);
+    state.merge_body_access_for_exposed_origin(&mut analysis.body_need, analysis.origin);
     state.validate_program_bounds(&analysis, expression.span);
 
     if state.diagnostics.is_empty() {
@@ -226,12 +227,14 @@ impl<'a> AnalyzeState<'a> {
 
   fn analyze_identifier(&mut self, name: &str, span: SourceSpan) -> ExprAnalysis {
     if let Some(binding) = self.local_binding(name).cloned() {
-      return ExprAnalysis::leaf(
+      let mut analysis = ExprAnalysis::leaf(
         VerifiedExpression::new(VerifiedExprKind::Identifier(name.to_string()), span),
         binding.origin,
       )
       .with_path_option(binding.path)
       .with_mitigation_payload(binding.mitigation_payload);
+      self.merge_body_access_for_path(&mut analysis.body_need, analysis.path.as_deref());
+      return analysis;
     }
     if !self.analyzer.options.allow_unknown_variables && !self.schema.has_variable(name) {
       self
@@ -239,11 +242,13 @@ impl<'a> AnalyzeState<'a> {
         .push(Diagnostic::new(format!("unknown variable {name}"), span));
     }
     self.validate_variable_phase(name, span);
-    ExprAnalysis::leaf(
+    let mut analysis = ExprAnalysis::leaf(
       VerifiedExpression::new(VerifiedExprKind::Identifier(name.to_string()), span),
       ObjectOrigin::root(name),
     )
-    .with_path(vec![name.to_string()])
+    .with_path(vec![name.to_string()]);
+    self.merge_body_access_for_path(&mut analysis.body_need, analysis.path.as_deref());
+    analysis
   }
 
   fn analyze_array(
@@ -260,7 +265,8 @@ impl<'a> AnalyzeState<'a> {
       .iter()
       .map(|item| {
         let analysis = self.analyze_expression(item, depth + 1);
-        body_need = body_need.merge(analysis.body_need);
+        body_need = body_need
+          .merge(self.body_need_for_consumed_analysis(analysis.body_need, analysis.origin));
         mitigation_payload |= analysis.mitigation_payload;
         nodes += analysis.nodes;
         cost += analysis.cost;
@@ -351,6 +357,7 @@ impl<'a> AnalyzeState<'a> {
       self.require_capability(capability);
     }
     let capability_ticket = capability.map(CapabilityMeta::ticket);
+    let body_need = args_analysis.consumed_body_need;
     ExprAnalysis::new(
       verified_with_capability(
         VerifiedExpression::new(
@@ -364,7 +371,7 @@ impl<'a> AnalyzeState<'a> {
       ),
       None,
       None,
-      args_analysis.body_need,
+      body_need,
       args_analysis.nodes + 1,
       args_analysis.cost + capability.map_or(1, |capability| capability.cost.static_cost()),
     )
@@ -389,7 +396,9 @@ impl<'a> AnalyzeState<'a> {
       span,
     );
     let args_analysis = self.analyze_args(args, depth);
-    let mut body_need = receiver.body_need.merge(args_analysis.body_need);
+    let receiver_body_need =
+      self.body_need_for_consumed_analysis(receiver.body_need, receiver.origin);
+    let mut body_need = receiver_body_need.merge(args_analysis.consumed_body_need);
     let mitigation_payload = receiver.mitigation_payload || args_analysis.mitigation_payload;
     if let Some(capability) = capability {
       self.validate_capability(capability, span);
@@ -438,6 +447,7 @@ impl<'a> AnalyzeState<'a> {
     self.validate_capability(&capability, span);
     self.require_capability(&capability);
     let ticket = capability.ticket();
+    let body_need = self.body_need_for_consumed_analysis(expr.body_need, expr.origin);
     ExprAnalysis::new(
       VerifiedExpression::new(
         VerifiedExprKind::Unary {
@@ -449,7 +459,7 @@ impl<'a> AnalyzeState<'a> {
       .with_capability_ticket(ticket),
       None,
       None,
-      expr.body_need,
+      body_need,
       expr.nodes + 1,
       expr.cost + capability.cost.static_cost(),
     )
@@ -474,6 +484,8 @@ impl<'a> AnalyzeState<'a> {
     self.validate_capability(&capability, span);
     self.require_capability(&capability);
     let ticket = capability.ticket();
+    let left_body_need = self.body_need_for_consumed_analysis(left.body_need, left.origin);
+    let right_body_need = self.body_need_for_consumed_analysis(right.body_need, right.origin);
     ExprAnalysis::new(
       VerifiedExpression::new(
         VerifiedExprKind::Binary {
@@ -486,7 +498,7 @@ impl<'a> AnalyzeState<'a> {
       .with_capability_ticket(ticket),
       None,
       None,
-      left.body_need.merge(right.body_need),
+      left_body_need.merge(right_body_need),
       left.nodes + right.nodes + 1,
       left.cost + right.cost + capability.cost.static_cost(),
     )
@@ -495,6 +507,7 @@ impl<'a> AnalyzeState<'a> {
 
   fn analyze_args(&mut self, args: &[AstExpression], depth: usize) -> ArgsAnalysis {
     let mut body_need = BodyNeedSummary::default();
+    let mut consumed_body_need = BodyNeedSummary::default();
     let mut mitigation_payload = false;
     let mut nodes = 0;
     let mut cost = 0;
@@ -504,6 +517,8 @@ impl<'a> AnalyzeState<'a> {
         let analysis = self.analyze_expression(arg, depth + 1);
         let binding = LocalBinding::from_analysis(&analysis);
         body_need = body_need.merge(analysis.body_need);
+        consumed_body_need = consumed_body_need
+          .merge(self.body_need_for_consumed_analysis(analysis.body_need, analysis.origin));
         mitigation_payload |= analysis.mitigation_payload;
         nodes += analysis.nodes;
         cost += analysis.cost;
@@ -515,6 +530,7 @@ impl<'a> AnalyzeState<'a> {
       exprs,
       bindings,
       body_need,
+      consumed_body_need,
       mitigation_payload,
       nodes,
       cost,

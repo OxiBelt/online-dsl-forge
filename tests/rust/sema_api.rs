@@ -382,6 +382,43 @@ fn generic_safe_can_deny_host_declared_body_access() {
 }
 
 #[test]
+fn generic_safe_can_deny_root_host_declared_body_access() {
+  let ast = parse_expression("payload.contains(\"secret\")").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("payload")
+    .add_body_path(["payload"], BodyTarget::Request, BodyAccess::PrefixBytes)
+    .add_method("contains", 1);
+  let profile = SecurityProfile::generic_safe().deny_body_access();
+
+  let error = Analyzer::new(profile)
+    .analyze(&ast, &schema)
+    .expect_err("root body access should exceed the denied generic profile limit");
+
+  assert!(
+    error
+      .to_string()
+      .contains("body access limit exceeded by profile")
+  );
+}
+
+#[test]
+fn generic_safe_reports_root_host_declared_body_need() {
+  let ast = parse_expression("payload.contains(\"secret\")").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("payload")
+    .add_body_path(["payload"], BodyTarget::Request, BodyAccess::PrefixBytes)
+    .add_method("contains", 1);
+
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect("root body access should analyze when the profile allows it");
+
+  assert_eq!(verified.body_need().request, BodyAccess::PrefixBytes);
+}
+
+#[test]
 fn generic_safe_can_allow_host_declared_body_access_after_denying_it() {
   let ast =
     parse_expression("event.payload.contains(\"secret\")").expect("expression should parse");
@@ -423,6 +460,22 @@ fn generic_safe_can_limit_body_access_by_target() {
   let verified = Analyzer::new(profile)
     .analyze(&ast, &schema)
     .expect("size-only body access should fit the profile limit");
+
+  assert_eq!(verified.body_need().request, BodyAccess::SizeOnly);
+}
+
+#[test]
+fn generic_safe_preserves_size_only_body_member_access() {
+  let ast = parse_expression("Request.Body.Size > 0").expect("expression should parse");
+  let profile = SecurityProfile::generic_safe().with_body_access_limit(Some(BodyNeedSummary {
+    request: BodyAccess::SizeOnly,
+    response: BodyAccess::None,
+    stream: BodyAccess::None,
+  }));
+
+  let verified = Analyzer::new(profile)
+    .analyze(&ast, &RuntimeSchema::waf())
+    .expect("size-only body member access should fit the profile limit");
 
   assert_eq!(verified.body_need().request, BodyAccess::SizeOnly);
 }
@@ -606,6 +659,60 @@ fn mitigation_rejects_body_object_passed_through_function() {
       .to_string()
       .contains("MitigationField cannot read request, response, or stream body bytes")
   );
+}
+
+#[test]
+fn generic_safe_denies_waf_body_object_boundaries() {
+  for expression in ["Request.Body", "Response.Body"] {
+    let ast = parse_expression(expression).expect("expression should parse");
+    let error = Analyzer::new(SecurityProfile::generic_safe().deny_body_access())
+      .analyze(&ast, &RuntimeSchema::waf())
+      .expect_err("body object access should exceed the denied generic profile limit");
+
+    assert!(
+      error
+        .to_string()
+        .contains("body access limit exceeded by profile")
+    );
+  }
+}
+
+#[test]
+fn generic_safe_denies_body_object_passed_through_expression_function() {
+  let ast = parse_expression("identity(Request.Body)").expect("expression should parse");
+  let identity = parse_expression("body").expect("function should parse");
+  let mut schema = RuntimeSchema::waf();
+  schema.add_expression_function("identity", ["body"], identity);
+
+  let error = Analyzer::new(SecurityProfile::generic_safe().deny_body_access())
+    .analyze(&ast, &schema)
+    .expect_err("function-mediated body object access should exceed the denied limit");
+
+  assert!(
+    error
+      .to_string()
+      .contains("body access limit exceeded by profile")
+  );
+}
+
+#[test]
+fn generic_safe_denies_body_object_passed_to_host_calls() {
+  let function_ast = parse_expression("inspect(Request.Body)").expect("expression should parse");
+  let method_ast = parse_expression("Request.Body.inspect()").expect("expression should parse");
+  let mut schema = RuntimeSchema::waf();
+  schema.add_function("inspect", 1).add_method("inspect", 0);
+
+  for ast in [&function_ast, &method_ast] {
+    let error = Analyzer::new(SecurityProfile::generic_safe().deny_body_access())
+      .analyze(ast, &schema)
+      .expect_err("host-call body object access should exceed the denied generic profile limit");
+
+    assert!(
+      error
+        .to_string()
+        .contains("body access limit exceeded by profile")
+    );
+  }
 }
 
 #[test]
