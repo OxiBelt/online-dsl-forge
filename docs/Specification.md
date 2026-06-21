@@ -54,6 +54,9 @@ tests.
 Parser diagnostics should include a stable message and source span. Diagnostics
 must not panic on malformed input.
 
+Parsing enforces an internal recursion-depth budget for nested expressions and
+reports a diagnostic instead of exhausting the host stack.
+
 ## Canonical Formatting
 
 Canonical formatting emits a deterministic normalized expression string from an

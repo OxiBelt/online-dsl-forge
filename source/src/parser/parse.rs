@@ -3,6 +3,9 @@ use super::diagnostics::{Diagnostic, DiagnosticReport};
 use super::lexer::{Token, TokenKind, tokenize};
 use super::span::SourceSpan;
 
+const MAX_PARSE_RECURSION_DEPTH: usize = 256;
+const PARSE_RECURSION_DEPTH_EXCEEDED: &str = "parse recursion depth limit exceeded";
+
 pub fn parse_expression(input: &str) -> Result<AstExpression, DiagnosticReport> {
   let tokens = tokenize(input).map_err(DiagnosticReport::new)?;
   Parser::new(tokens).parse()
@@ -11,6 +14,7 @@ pub fn parse_expression(input: &str) -> Result<AstExpression, DiagnosticReport> 
 struct Parser {
   tokens: Vec<Token>,
   position: usize,
+  recursion_depth: usize,
 }
 
 impl Parser {
@@ -18,6 +22,7 @@ impl Parser {
     Self {
       tokens,
       position: 0,
+      recursion_depth: 0,
     }
   }
 
@@ -170,7 +175,7 @@ impl Parser {
 
   fn parse_unary(&mut self) -> Result<AstExpression, DiagnosticReport> {
     if let Some(token) = self.consume_kind(|kind| matches!(kind, TokenKind::Bang)) {
-      let expr = self.parse_unary()?;
+      let expr = self.parse_nested(token.span, |parser| parser.parse_unary())?;
       let span = token.span.join(expr.span);
       return Ok(AstExpression::new(
         ExprKind::Unary {
@@ -182,7 +187,7 @@ impl Parser {
     }
 
     if let Some(token) = self.consume_kind(|kind| matches!(kind, TokenKind::Minus)) {
-      let expr = self.parse_unary()?;
+      let expr = self.parse_nested(token.span, |parser| parser.parse_unary())?;
       let span = token.span.join(expr.span);
       return Ok(AstExpression::new(
         ExprKind::Unary {
@@ -265,7 +270,7 @@ impl Parser {
         }
       }
       TokenKind::LParen => {
-        let expression = self.parse_or()?;
+        let expression = self.parse_nested(token.span, |parser| parser.parse_or())?;
         self.expect_kind("expected closing parenthesis", |kind| {
           matches!(kind, TokenKind::RParen)
         })?;
@@ -286,7 +291,7 @@ impl Parser {
     }
 
     loop {
-      items.push(self.parse_or()?);
+      items.push(self.parse_nested(start_span, |parser| parser.parse_or())?);
       if let Some(end) = self.consume_kind(|kind| matches!(kind, TokenKind::RBracket)) {
         return Ok(AstExpression::new(
           ExprKind::Array { items },
@@ -306,7 +311,8 @@ impl Parser {
     }
 
     loop {
-      args.push(self.parse_or()?);
+      let span = self.peek().span;
+      args.push(self.parse_nested(span, |parser| parser.parse_or())?);
       if let Some(end) = self.consume_kind(|kind| matches!(kind, TokenKind::RParen)) {
         return Ok((args, end.span));
       }
@@ -377,6 +383,23 @@ impl Parser {
 
   fn error_here(&self, message: &'static str) -> DiagnosticReport {
     DiagnosticReport::single(message, self.peek().span)
+  }
+
+  fn parse_nested<T>(
+    &mut self,
+    span: SourceSpan,
+    parse: impl FnOnce(&mut Self) -> Result<T, DiagnosticReport>,
+  ) -> Result<T, DiagnosticReport> {
+    if self.recursion_depth >= MAX_PARSE_RECURSION_DEPTH {
+      return Err(DiagnosticReport::single(
+        PARSE_RECURSION_DEPTH_EXCEEDED,
+        span,
+      ));
+    }
+    self.recursion_depth += 1;
+    let result = parse(self);
+    self.recursion_depth -= 1;
+    result
   }
 }
 

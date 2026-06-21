@@ -28,3 +28,33 @@ fn parser_api_reports_diagnostics() {
   assert_eq!(report.diagnostics.len(), 1);
   assert_eq!(report.diagnostics[0].message, "expected expression");
 }
+
+#[test]
+fn parser_api_rejects_excessive_recursive_nesting() {
+  let cases = [
+    ("unary operators", format!("{}true", "!".repeat(300))),
+    (
+      "parentheses",
+      format!("{}true{}", "(".repeat(300), ")".repeat(300)),
+    ),
+    (
+      "arrays",
+      format!("{}true{}", "[".repeat(300), "]".repeat(300)),
+    ),
+    (
+      "call arguments",
+      format!("{}true{}", "len(".repeat(300), ")".repeat(300)),
+    ),
+  ];
+
+  for (name, input) in cases {
+    let error = parse_expression(&input).expect_err(name);
+    assert!(
+      error
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message == "parse recursion depth limit exceeded"),
+      "{name} should report parse recursion depth limit exceeded, got {error}"
+    );
+  }
+}

@@ -48,6 +48,18 @@ fn cli_reports_parse_errors() {
   assert!(stderr(&output).contains("expected expression"));
 }
 
+#[test]
+fn cli_rejects_excessive_parse_depth_without_aborting() {
+  let expression = format!("{}true", "!".repeat(300));
+  let output = cli()
+    .args(["check", expression.as_str()])
+    .output()
+    .expect("CLI should run");
+
+  assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+  assert!(stderr(&output).contains("parse recursion depth limit exceeded"));
+}
+
 fn stderr(output: &std::process::Output) -> String {
   String::from_utf8(output.stderr.clone()).unwrap_or_else(|_| "<non-utf8 stderr>".to_string())
 }
