@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use serde_json::Value as JsonValue;
+
 const EXPECTED_TARGETS: &[&str] = &["dsl_expression", "expression_pipeline", "rulepack_render"];
 
 fn repo_root() -> PathBuf {
@@ -19,6 +21,38 @@ fn read_repo_file(path: &str) -> String {
 fn parse_repo_toml(path: &str) -> toml::Value {
   toml::from_str(&read_repo_file(path))
     .unwrap_or_else(|error| panic!("{path} should contain valid TOML: {error}"))
+}
+
+fn parse_workflow_yaml(path: &str) -> JsonValue {
+  serde_saphyr::from_str(&read_repo_file(path))
+    .unwrap_or_else(|error| panic!("{path} should contain valid YAML: {error}"))
+}
+
+fn json_string_array(value: &JsonValue, context: &str) -> Vec<String> {
+  value
+    .as_array()
+    .unwrap_or_else(|| panic!("{context} should be an array"))
+    .iter()
+    .map(|entry| {
+      entry
+        .as_str()
+        .unwrap_or_else(|| panic!("{context} entries should be strings"))
+        .to_string()
+    })
+    .collect()
+}
+
+fn workflow_steps<'a>(job: &'a JsonValue, context: &str) -> &'a [JsonValue] {
+  job["steps"]
+    .as_array()
+    .unwrap_or_else(|| panic!("{context} should define steps"))
+}
+
+fn workflow_step<'a>(steps: &'a [JsonValue], name: &str) -> &'a JsonValue {
+  steps
+    .iter()
+    .find(|step| step["name"].as_str() == Some(name))
+    .unwrap_or_else(|| panic!("workflow should define step `{name}`"))
 }
 
 fn target_tables() -> Vec<toml::Table> {
@@ -297,4 +331,131 @@ fn fuzz_runner_matches_the_catalog_security_contract() {
       .mode();
     assert_ne!(mode & 0o111, 0, "fuzz runner must be executable");
   }
+}
+
+#[test]
+fn fuzz_workflows_cover_every_target_and_profile_with_pinned_actions() {
+  let expected_targets = EXPECTED_TARGETS
+    .iter()
+    .map(|target| (*target).to_string())
+    .collect::<Vec<_>>();
+
+  let checks = parse_workflow_yaml(".github/workflows/check-online-dsl-forge.yml");
+  let smoke = &checks["jobs"]["fuzz-smoke"];
+  assert_eq!(smoke["runs-on"].as_str(), Some("ubuntu-latest"));
+  assert_eq!(smoke["timeout-minutes"].as_u64(), Some(30));
+  assert_eq!(smoke["permissions"]["contents"].as_str(), Some("read"));
+  assert_eq!(smoke["strategy"]["fail-fast"].as_bool(), Some(false));
+  assert_eq!(
+    json_string_array(
+      &smoke["strategy"]["matrix"]["fuzz_target"],
+      "smoke fuzz target matrix"
+    ),
+    expected_targets
+  );
+  let profiles = smoke["strategy"]["matrix"]["fuzz_profile"]
+    .as_array()
+    .expect("smoke workflow should define a fuzz profile matrix");
+  assert_eq!(profiles.len(), 2);
+  assert!(profiles.iter().any(|profile| {
+    profile["name"].as_str() == Some("stable") && profile["toolchain"].as_str() == Some("1.98.0")
+  }));
+  assert!(profiles.iter().any(|profile| {
+    profile["name"].as_str() == Some("asan")
+      && profile["toolchain"].as_str() == Some("nightly-2026-08-04")
+  }));
+  let smoke_steps = workflow_steps(smoke, "smoke fuzz job");
+  let smoke_run = workflow_step(smoke_steps, "Run bounded smoke target");
+  assert_eq!(
+    smoke_run["run"].as_str(),
+    Some("tests/scripts/run-fuzz-target.sh smoke ${{ matrix.fuzz_target }}")
+  );
+  assert_eq!(
+    smoke_run["env"]["ONLINE_DSL_FORGE_FUZZ_PROFILE"].as_str(),
+    Some("${{ matrix.fuzz_profile.name }}")
+  );
+  let smoke_upload = workflow_step(smoke_steps, "Upload fuzz failure evidence");
+  assert_eq!(smoke_upload["if"].as_str(), Some("failure()"));
+  assert_eq!(
+    smoke_upload["uses"].as_str(),
+    Some("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a")
+  );
+  assert_eq!(smoke_upload["with"]["retention-days"].as_u64(), Some(90));
+
+  let sustained = parse_workflow_yaml(".github/workflows/fuzz-sustained.yml");
+  assert_eq!(
+    sustained["on"]["schedule"][0]["cron"].as_str(),
+    Some("17 3 * * *")
+  );
+  assert!(sustained["on"].get("workflow_dispatch").is_some());
+  assert_eq!(sustained["permissions"]["contents"].as_str(), Some("read"));
+  assert_eq!(
+    sustained["concurrency"]["cancel-in-progress"].as_bool(),
+    Some(false)
+  );
+  let campaign = &sustained["jobs"]["fuzz-sustained"];
+  assert_eq!(
+    campaign["if"].as_str(),
+    Some("github.ref_name == github.event.repository.default_branch")
+  );
+  assert_eq!(campaign["timeout-minutes"].as_u64(), Some(60));
+  assert_eq!(campaign["permissions"]["contents"].as_str(), Some("read"));
+  assert_eq!(campaign["strategy"]["fail-fast"].as_bool(), Some(false));
+  assert_eq!(
+    json_string_array(
+      &campaign["strategy"]["matrix"]["fuzz_target"],
+      "sustained fuzz target matrix"
+    ),
+    expected_targets
+  );
+
+  let campaign_steps = workflow_steps(campaign, "sustained fuzz job");
+  let restore = workflow_step(campaign_steps, "Restore bounded target corpus");
+  let save = workflow_step(campaign_steps, "Save minimized target corpus");
+  assert_eq!(
+    restore["uses"].as_str(),
+    Some("actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9")
+  );
+  assert_eq!(
+    save["uses"].as_str(),
+    Some("actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9")
+  );
+  assert_eq!(
+    restore["with"]["path"].as_str(),
+    Some("${{ runner.temp }}/online-dsl-forge-fuzz-corpus/${{ matrix.fuzz_target }}")
+  );
+  assert_eq!(
+    save["if"].as_str(),
+    Some("steps.campaign.outcome == 'success' && steps.cmin.outcome == 'success'")
+  );
+  let campaign_run = workflow_step(campaign_steps, "Run fifteen-minute campaign");
+  assert_eq!(campaign_run["continue-on-error"].as_bool(), Some(true));
+  assert_eq!(
+    campaign_run["run"].as_str(),
+    Some("tests/scripts/run-fuzz-target.sh campaign ${{ matrix.fuzz_target }} 900")
+  );
+  let coverage = workflow_step(campaign_steps, "Generate source coverage");
+  assert_eq!(
+    coverage["if"].as_str(),
+    Some("always() && steps.cmin.outcome == 'success'")
+  );
+  assert_eq!(coverage["continue-on-error"].as_bool(), Some(true));
+
+  let coverage_upload = workflow_step(campaign_steps, "Upload coverage evidence");
+  let corpus_upload = workflow_step(campaign_steps, "Upload reviewed corpus candidate");
+  let failure_upload = workflow_step(campaign_steps, "Upload failure evidence");
+  for upload in [coverage_upload, corpus_upload, failure_upload] {
+    assert_eq!(
+      upload["uses"].as_str(),
+      Some("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a")
+    );
+  }
+  assert_eq!(coverage_upload["with"]["retention-days"].as_u64(), Some(30));
+  assert_eq!(corpus_upload["with"]["retention-days"].as_u64(), Some(30));
+  assert_eq!(failure_upload["with"]["retention-days"].as_u64(), Some(90));
+  assert!(
+    workflow_step(campaign_steps, "Propagate campaign and evidence failures")["run"]
+      .as_str()
+      .is_some_and(|script| script.contains("exit \"$failed\""))
+  );
 }

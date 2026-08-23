@@ -85,6 +85,63 @@ jobs:
       - name: Cargo test
         run: cargo test --all-features --locked
 
+  fuzz-smoke:
+    name: Fuzz smoke (${{ matrix.fuzz_profile.name }}, ${{ matrix.fuzz_target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        fuzz_profile:
+          - name: stable
+            toolchain: 1.98.0
+          - name: asan
+            toolchain: nightly-2026-08-04
+        fuzz_target:
+          - dsl_expression
+          - expression_pipeline
+          - rulepack_render
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+
+      - name: Install pinned Rust toolchain
+        env:
+          FUZZ_PROFILE: ${{ matrix.fuzz_profile.name }}
+          FUZZ_TOOLCHAIN: ${{ matrix.fuzz_profile.toolchain }}
+        run: |
+          if [[ "$FUZZ_PROFILE" == "asan" ]]; then
+            rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal --component llvm-tools-preview
+          else
+            rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+          fi
+
+      - name: Install pinned cargo-fuzz
+        env:
+          FUZZ_TOOLCHAIN: ${{ matrix.fuzz_profile.toolchain }}
+        run: |
+          cargo "+$FUZZ_TOOLCHAIN" install cargo-fuzz --version 0.13.2 --locked
+          test "$(cargo "+$FUZZ_TOOLCHAIN" fuzz --version)" = "cargo-fuzz 0.13.2"
+
+      - name: Run bounded smoke target
+        env:
+          ONLINE_DSL_FORGE_FUZZ_PROFILE: ${{ matrix.fuzz_profile.name }}
+        run: tests/scripts/run-fuzz-target.sh smoke ${{ matrix.fuzz_target }}
+
+      - name: Upload fuzz failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: online-dsl-forge-${{ matrix.fuzz_profile.name }}-${{ matrix.fuzz_target }}-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/online-dsl-forge-fuzz-artifacts/${{ matrix.fuzz_target }}
+            ${{ runner.temp }}/online-dsl-forge-fuzz-failures/${{ matrix.fuzz_target }}
+          if-no-files-found: ignore
+          retention-days: 90
+
   rust-advisory-checks:
     name: Rust advisory checks
     runs-on: ubuntu-latest
