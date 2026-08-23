@@ -58,7 +58,7 @@ jobs:
         run: tests/scripts/check-rust-module-size.sh
 
   test:
-    name: Test with rust-1.96.0
+    name: Test with rust-1.98.0
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -69,9 +69,9 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.96.0 --profile minimal
-          rustup default 1.96.0
-          rustup component add rustfmt clippy --toolchain 1.96.0
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+          rustup component add rustfmt clippy --toolchain 1.98.0
 
       - name: Cargo fmt
         run: cargo fmt --check
@@ -97,8 +97,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.96.0 --profile minimal
-          rustup default 1.96.0
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Install Rust advisory tools
         run: |

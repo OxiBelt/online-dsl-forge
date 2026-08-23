@@ -27,14 +27,14 @@ function createWorkspace(manifestVersion = '0.0.0', lockVersion = '0.0.0'): Work
 name = "${PackageName}"
 version = "${manifestVersion}"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.98"
 license = "Apache-2.0"
 description = "A bounded parser and runtime for in-memory DSL expressions."
 repository = "https://github.com/OxiBelt/online-dsl-forge"
 publish = false
 
 [dependencies]
-serde = "1.0.228"
+serde = "1.0.229"
 `
   )
 
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "serde"
-version = "1.0.228"
+version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "placeholder"
 `
