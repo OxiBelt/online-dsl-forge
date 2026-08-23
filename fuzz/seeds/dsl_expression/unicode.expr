@@ -1,0 +1,1 @@
+message == "snowman ☃" || Request.Path.contains("/路径")

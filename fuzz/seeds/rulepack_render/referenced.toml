@@ -1,0 +1,18 @@
+01[rulepack]
+schema_version = 2
+name = "fuzz-files"
+version = "0.1.0"
+
+[[variables]]
+name = "prefix"
+type = "string"
+default = "/admin"
+
+[[rules]]
+name = "admin"
+phase = "request"
+priority = 10
+path = "rules/admin.oxirule.toml"
+
+---FILES---
+{"variables":{"prefix":"/private"},"files":{"rules/admin.oxirule.toml":"when = \"Request.Path.starts_with('{{prefix}}')\"\n"}}

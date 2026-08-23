@@ -66,6 +66,14 @@ cargo audit
 cargo deny check advisories
 ```
 
+When changing the parser, semantic analyzer, runtime, rulepack renderer, fuzz
+targets, or fuzz orchestration, also run the affected entries from the bounded
+fuzz program documented in `docs/Fuzzing.md`. At minimum, install the pinned
+`cargo-fuzz` version and run stable and AddressSanitizer smoke coverage for the
+affected targets. Generated corpora, artifacts, and coverage output are not
+source contributions. Promote only minimized, reviewed reproducers through the
+explicit registry in `tests/rust/fuzz_regressions.rs`.
+
 When changing versioning or release automation, also run:
 
 ```sh

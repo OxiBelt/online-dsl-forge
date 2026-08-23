@@ -1,0 +1,55 @@
+version = 1
+
+[program]
+max_seed_files_per_target = 128
+max_seed_bytes_per_target = 524288
+max_working_corpus_files_per_target = 16384
+max_cached_corpus_files_per_target = 8192
+max_cached_corpus_bytes_per_target = 67108864
+max_artifact_files_per_target = 8
+smoke_runs = 256
+campaign_seconds = 900
+input_timeout_seconds = 10
+rss_limit_mb = 3072
+allocation_limit_mb = 512
+smoke_leak_detection = false
+campaign_leak_detection = true
+
+[[target]]
+name = "dsl_expression"
+owner = "parser, AST, diagnostics, and formatter maintainers"
+max_input_bytes = 8192
+input_contract = "Arbitrary bytes mapped through lossy UTF-8 into the public lexer and parser boundary."
+invariants = ["lexing and parsing never panic", "token, AST, and diagnostic spans stay within UTF-8 boundaries", "AST serialization and canonical formatting round trips are deterministic"]
+unsupported_states = ["deserializing attacker-constructed recursive ASTs", "semantic analysis", "runtime evaluation"]
+seed_dir = "fuzz/seeds/dsl_expression"
+dictionary = "fuzz/dictionaries/expression.dict"
+coverage_landmarks = ["source/src/parser/lexer.rs:tokenize", "source/src/parser/parse.rs:parse_expression", "source/src/parser/format.rs:format_expression"]
+regression_path = "tests/fixtures/fuzz-regressions/dsl_expression"
+leak_policy = "enabled_in_campaigns"
+
+[[target]]
+name = "expression_pipeline"
+owner = "semantic analysis, compiler, and bounded runtime maintainers"
+max_input_bytes = 16384
+input_contract = "Bounded selectors plus expression text and optional JSON bindings exercise fixed generic, WAF, and OxiRule in-memory configurations."
+invariants = ["semantic and compile outcomes are deterministic", "successful programs stay within profile bounds and retain aligned capability metadata", "bounded evaluation and canonicalized evaluation produce the same value or error class"]
+unsupported_states = ["external callbacks", "host I/O", "unbounded or recursive binding construction"]
+seed_dir = "fuzz/seeds/expression_pipeline"
+dictionary = "fuzz/dictionaries/expression.dict"
+coverage_landmarks = ["source/src/sema/analyzer.rs:Analyzer::analyze", "source/src/runtime.rs:evaluate_verified"]
+regression_path = "tests/fixtures/fuzz-regressions/expression_pipeline"
+leak_policy = "enabled_in_campaigns"
+
+[[target]]
+name = "rulepack_render"
+owner = "rulepack manifest and in-memory resolver maintainers"
+max_input_bytes = 65536
+input_contract = "Bounded selectors plus untrusted TOML and an optional JSON map of in-memory referenced files."
+invariants = ["inspection and rendering never panic", "repeated operations return identical values or errors", "referenced files remain memory-only and unsafe paths fail closed"]
+unsupported_states = ["filesystem access", "network access", "production bundle or credential data"]
+seed_dir = "fuzz/seeds/rulepack_render"
+dictionary = "fuzz/dictionaries/rulepack.dict"
+coverage_landmarks = ["source/src/rulepack_render/mod.rs:inspect_rulepack", "source/src/rulepack_render/mod.rs:render_rulepack_bundle"]
+regression_path = "tests/fixtures/fuzz-regressions/rulepack_render"
+leak_policy = "enabled_in_campaigns"

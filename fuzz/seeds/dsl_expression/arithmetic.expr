@@ -1,0 +1,1 @@
+score + 1 >= 10 && name.starts_with("pi")

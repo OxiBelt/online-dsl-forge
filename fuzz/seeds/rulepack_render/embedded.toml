@@ -1,0 +1,12 @@
+00[rulepack]
+schema_version = 2
+name = "fuzz-demo"
+version = "0.1.0"
+
+[[rules]]
+name = "allow-health"
+phase = "request"
+priority = 100
+content = '''
+when = "Request.Path == '/health'"
+'''

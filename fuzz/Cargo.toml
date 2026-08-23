@@ -1,0 +1,36 @@
+[package]
+name = "online-dsl-forge-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = "1.4.2"
+libfuzzer-sys = "0.4.13"
+online-dsl-forge = { path = "../source" }
+serde = "1.0.229"
+serde_json = "1.0.151"
+
+[[bin]]
+name = "dsl_expression"
+path = "fuzz_targets/dsl_expression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "expression_pipeline"
+path = "fuzz_targets/expression_pipeline.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rulepack_render"
+path = "fuzz_targets/rulepack_render.rs"
+test = false
+doc = false
+bench = false

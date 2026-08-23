@@ -60,6 +60,7 @@ cargo run --manifest-path source/Cargo.toml --bin online-dsl-forgectl -- \
 
 - [Technical specification](docs/Specification.md)
 - [Expression reference](docs/Expression.md)
+- [Fuzz testing](docs/Fuzzing.md)
 - [Contributing guide](CONTRIBUTING.md)
 
 ## Project Layout
@@ -70,6 +71,7 @@ source/src/parser/            Parser, AST, diagnostics, spans, and formatter mod
 source/src/rulepack_render/   In-memory rulepack manifest rendering and file resolution APIs
 source/src/sema/              Runtime schemas, analyzer, profile model, and verified IR
 source/src/                   Runtime, values, re-exports, compile API, and CLI
+fuzz/                         Bounded cargo-fuzz targets, seeds, dictionaries, and catalog
 tests/rust/                   Repository-level Rust integration tests
 tests/scripts/                Local and CI check scripts
 docs/                         Specification and expression reference
