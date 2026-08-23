@@ -5,8 +5,8 @@
   "version": "0.0.0",
   "packageManager": "pnpm@11.8.0",
   "scripts": {
-    "lint": "eslint",
-    "test": "node --import tsx devops/tests/versioning.test.ts",
+    "lint": "oxlint \"devops/**/*.ts\" devops/oxlint-plugin.mjs",
+    "test": "node --import tsx --test devops/tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "versioning:check": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path source/Cargo.toml --package-name online-dsl-forge --lockfile-path Cargo.lock",
     "versioning:release": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path source/Cargo.toml --package-name online-dsl-forge --lockfile-path Cargo.lock --ref \"$ONLINE_DSL_FORGE_RELEASE_REF\" --release-publish"
@@ -21,9 +21,8 @@
   "devDependencies": {
     "@types/node": "^24.12.3",
     "@types/semver": "^7.7.1",
-    "@typescript-eslint/eslint-plugin": "^8.59.2",
-    "@typescript-eslint/parser": "^8.59.2",
-    "eslint": "^10.3.0",
+    "oxlint": "^1.79.0",
+    "oxlint-tsgolint": "^7.0.2001",
     "typescript": "^6.0.3"
   }
 }
