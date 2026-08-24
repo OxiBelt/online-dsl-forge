@@ -37,7 +37,9 @@ Arbitrary bytes are mapped through lossy UTF-8 because the Rust API accepts
 `&str`. The target exercises tokenization, parsing, AST serialization,
 canonical formatting, and reparsing. Token, AST, and diagnostic spans must stay
 ordered, in bounds, and on UTF-8 character boundaries. Canonical formatting
-must be idempotent.
+must be idempotent. Successful parses must also round-trip through the default
+`serde_json` recursion limit; more deeply nested AST shapes are rejected by the
+parser.
 
 ### `expression_pipeline`
 

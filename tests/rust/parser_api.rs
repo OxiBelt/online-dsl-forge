@@ -1,5 +1,22 @@
-use online_dsl_forge::{DiagnosticReport, ExprKind, format_expression, parse_expression};
+use online_dsl_forge::{
+  AstExpression, DiagnosticReport, ExprKind, SourceSpan, format_expression, parse_expression,
+};
 use serde_json::json;
+
+fn assert_default_json_round_trip(input: &str) {
+  let ast = parse_expression(input).expect("boundary expression should parse");
+  let serialized = serde_json::to_vec(&ast).expect("AST should serialize");
+  let decoded: AstExpression =
+    serde_json::from_slice(&serialized).expect("serialized AST should deserialize");
+  assert_eq!(ast, decoded, "AST JSON round trip should be exact");
+}
+
+fn assert_ast_depth_error(input: &str) {
+  let error = parse_expression(input).expect_err("over-depth expression should fail");
+  assert_eq!(error.diagnostics.len(), 1);
+  assert_eq!(error.diagnostics[0].message, "AST depth limit exceeded");
+  assert_eq!(error.diagnostics[0].span, SourceSpan::new(0, input.len()));
+}
 
 #[test]
 fn parser_api_parses_formats_and_serializes_ast() {
@@ -56,5 +73,39 @@ fn parser_api_rejects_excessive_recursive_nesting() {
         .any(|diagnostic| diagnostic.message == "parse recursion depth limit exceeded"),
       "{name} should report parse recursion depth limit exceeded, got {error}"
     );
+  }
+}
+
+#[test]
+fn parser_api_bounds_serialized_ast_depth() {
+  let accepted = [
+    format!("{}a", "-".repeat(62)),
+    vec!["a"; 63].join("-"),
+    format!("a{}", ".x".repeat(62)),
+    format!("{}a{}", "[".repeat(41), "]".repeat(41)),
+    format!("{}a{}", "f(".repeat(41), ")".repeat(41)),
+    format!("a{}", ".f()".repeat(62)),
+    format!("{}a{}", "a.f(".repeat(41), ")".repeat(41)),
+    format!("[{}]", vec!["a"; 512].join(",")),
+    format!("f({})", vec!["a"; 512].join(",")),
+  ];
+
+  for input in accepted {
+    assert_default_json_round_trip(&input);
+  }
+
+  let rejected = [
+    format!("{}a", "-".repeat(63)),
+    vec!["a"; 64].join("-"),
+    format!("a{}", ".x".repeat(63)),
+    format!("{}a{}", "[".repeat(42), "]".repeat(42)),
+    format!("{}a{}", "f(".repeat(42), ")".repeat(42)),
+    format!("a{}", ".f()".repeat(63)),
+    format!("{}a{}", "a.f(".repeat(42), ")".repeat(42)),
+    format!("{}R-ua", "-".repeat(62)),
+  ];
+
+  for input in rejected {
+    assert_ast_depth_error(&input);
   }
 }

@@ -4,11 +4,62 @@ use super::lexer::{Token, TokenKind, tokenize};
 use super::span::SourceSpan;
 
 const MAX_PARSE_RECURSION_DEPTH: usize = 256;
+// `serde_json` rejects the 128th nested container by default. Keep every AST
+// produced by the parser below that boundary so its public JSON form can be
+// deserialized without caller-specific configuration.
+const MAX_AST_SERIALIZED_DEPTH: usize = 127;
 const PARSE_RECURSION_DEPTH_EXCEEDED: &str = "parse recursion depth limit exceeded";
+const AST_DEPTH_EXCEEDED: &str = "AST depth limit exceeded";
 
 pub fn parse_expression(input: &str) -> Result<AstExpression, DiagnosticReport> {
   let tokens = tokenize(input).map_err(DiagnosticReport::new)?;
   Parser::new(tokens).parse()
+}
+
+struct ParsedExpression {
+  ast: AstExpression,
+  serialized_depth: usize,
+}
+
+impl ParsedExpression {
+  fn leaf(kind: ExprKind, span: SourceSpan) -> Self {
+    Self {
+      ast: AstExpression::new(kind, span),
+      serialized_depth: 2,
+    }
+  }
+
+  fn checked(
+    kind: ExprKind,
+    span: SourceSpan,
+    serialized_depth: usize,
+  ) -> Result<Self, DiagnosticReport> {
+    if serialized_depth > MAX_AST_SERIALIZED_DEPTH {
+      Err(DiagnosticReport::single(AST_DEPTH_EXCEEDED, span))
+    } else {
+      Ok(Self {
+        ast: AstExpression::new(kind, span),
+        serialized_depth,
+      })
+    }
+  }
+
+  fn span(&self) -> SourceSpan {
+    self.ast.span
+  }
+}
+
+#[derive(Default)]
+struct ParsedSequence {
+  expressions: Vec<AstExpression>,
+  max_serialized_depth: usize,
+}
+
+impl ParsedSequence {
+  fn push(&mut self, expression: ParsedExpression) {
+    self.max_serialized_depth = self.max_serialized_depth.max(expression.serialized_depth);
+    self.expressions.push(expression.ast);
+  }
 }
 
 struct Parser {
@@ -31,34 +82,34 @@ impl Parser {
     if !matches!(self.peek().kind, TokenKind::Eof) {
       return Err(self.error_here("unexpected token after expression"));
     }
-    Ok(expression)
+    Ok(expression.ast)
   }
 
-  fn parse_or(&mut self) -> Result<AstExpression, DiagnosticReport> {
+  fn parse_or(&mut self) -> Result<ParsedExpression, DiagnosticReport> {
     let mut expression = self.parse_and()?;
     while self
       .consume_kind(|kind| matches!(kind, TokenKind::OrOr))
       .is_some()
     {
       let right = self.parse_and()?;
-      expression = binary(expression, BinaryOp::Or, right);
+      expression = binary(expression, BinaryOp::Or, right)?;
     }
     Ok(expression)
   }
 
-  fn parse_and(&mut self) -> Result<AstExpression, DiagnosticReport> {
+  fn parse_and(&mut self) -> Result<ParsedExpression, DiagnosticReport> {
     let mut expression = self.parse_equality()?;
     while self
       .consume_kind(|kind| matches!(kind, TokenKind::AndAnd))
       .is_some()
     {
       let right = self.parse_equality()?;
-      expression = binary(expression, BinaryOp::And, right);
+      expression = binary(expression, BinaryOp::And, right)?;
     }
     Ok(expression)
   }
 
-  fn parse_equality(&mut self) -> Result<AstExpression, DiagnosticReport> {
+  fn parse_equality(&mut self) -> Result<ParsedExpression, DiagnosticReport> {
     let mut expression = self.parse_comparison()?;
     loop {
       let op = if self
@@ -78,12 +129,12 @@ impl Parser {
         break;
       };
       let right = self.parse_comparison()?;
-      expression = binary(expression, op, right);
+      expression = binary(expression, op, right)?;
     }
     Ok(expression)
   }
 
-  fn parse_comparison(&mut self) -> Result<AstExpression, DiagnosticReport> {
+  fn parse_comparison(&mut self) -> Result<ParsedExpression, DiagnosticReport> {
     let mut expression = self.parse_additive()?;
     loop {
       let op = if self
@@ -113,12 +164,12 @@ impl Parser {
         break;
       };
       let right = self.parse_additive()?;
-      expression = binary(expression, op, right);
+      expression = binary(expression, op, right)?;
     }
     Ok(expression)
   }
 
-  fn parse_additive(&mut self) -> Result<AstExpression, DiagnosticReport> {
+  fn parse_additive(&mut self) -> Result<ParsedExpression, DiagnosticReport> {
     let mut expression = self.parse_multiplicative()?;
     loop {
       let op = if self
@@ -138,12 +189,12 @@ impl Parser {
         break;
       };
       let right = self.parse_multiplicative()?;
-      expression = binary(expression, op, right);
+      expression = binary(expression, op, right)?;
     }
     Ok(expression)
   }
 
-  fn parse_multiplicative(&mut self) -> Result<AstExpression, DiagnosticReport> {
+  fn parse_multiplicative(&mut self) -> Result<ParsedExpression, DiagnosticReport> {
     let mut expression = self.parse_unary()?;
     loop {
       let op = if self
@@ -168,40 +219,44 @@ impl Parser {
         break;
       };
       let right = self.parse_unary()?;
-      expression = binary(expression, op, right);
+      expression = binary(expression, op, right)?;
     }
     Ok(expression)
   }
 
-  fn parse_unary(&mut self) -> Result<AstExpression, DiagnosticReport> {
+  fn parse_unary(&mut self) -> Result<ParsedExpression, DiagnosticReport> {
     if let Some(token) = self.consume_kind(|kind| matches!(kind, TokenKind::Bang)) {
       let expr = self.parse_nested(token.span, |parser| parser.parse_unary())?;
-      let span = token.span.join(expr.span);
-      return Ok(AstExpression::new(
+      let span = token.span.join(expr.span());
+      let serialized_depth = 2 + expr.serialized_depth;
+      return ParsedExpression::checked(
         ExprKind::Unary {
           op: UnaryOp::Not,
-          expr: Box::new(expr),
+          expr: Box::new(expr.ast),
         },
         span,
-      ));
+        serialized_depth,
+      );
     }
 
     if let Some(token) = self.consume_kind(|kind| matches!(kind, TokenKind::Minus)) {
       let expr = self.parse_nested(token.span, |parser| parser.parse_unary())?;
-      let span = token.span.join(expr.span);
-      return Ok(AstExpression::new(
+      let span = token.span.join(expr.span());
+      let serialized_depth = 2 + expr.serialized_depth;
+      return ParsedExpression::checked(
         ExprKind::Unary {
           op: UnaryOp::Neg,
-          expr: Box::new(expr),
+          expr: Box::new(expr.ast),
         },
         span,
-      ));
+        serialized_depth,
+      );
     }
 
     self.parse_postfix()
   }
 
-  fn parse_postfix(&mut self) -> Result<AstExpression, DiagnosticReport> {
+  fn parse_postfix(&mut self) -> Result<ParsedExpression, DiagnosticReport> {
     let mut expression = self.parse_primary()?;
     while self
       .consume_kind(|kind| matches!(kind, TokenKind::Dot))
@@ -213,44 +268,54 @@ impl Parser {
         .is_some()
       {
         let (args, end_span) = self.parse_call_args()?;
-        let span = expression.span.join(end_span);
-        expression = AstExpression::new(
+        let span = expression.span().join(end_span);
+        let serialized_depth = (2 + expression.serialized_depth).max(3 + args.max_serialized_depth);
+        expression = ParsedExpression::checked(
           ExprKind::MethodCall {
-            receiver: Box::new(expression),
+            receiver: Box::new(expression.ast),
             name,
-            args,
+            args: args.expressions,
           },
           span,
-        );
+          serialized_depth,
+        )?;
       } else {
-        let span = expression.span.join(self.previous_span());
-        expression = AstExpression::new(
+        let span = expression.span().join(self.previous_span());
+        let serialized_depth = 2 + expression.serialized_depth;
+        expression = ParsedExpression::checked(
           ExprKind::Member {
-            receiver: Box::new(expression),
+            receiver: Box::new(expression.ast),
             name,
           },
           span,
-        );
+          serialized_depth,
+        )?;
       }
     }
     Ok(expression)
   }
 
-  fn parse_primary(&mut self) -> Result<AstExpression, DiagnosticReport> {
+  fn parse_primary(&mut self) -> Result<ParsedExpression, DiagnosticReport> {
     let token = self.advance().clone();
     match token.kind {
-      TokenKind::True => Ok(AstExpression::new(
+      TokenKind::True => Ok(ParsedExpression::leaf(
         ExprKind::Bool { value: true },
         token.span,
       )),
-      TokenKind::False => Ok(AstExpression::new(
+      TokenKind::False => Ok(ParsedExpression::leaf(
         ExprKind::Bool { value: false },
         token.span,
       )),
-      TokenKind::Null => Ok(AstExpression::new(ExprKind::Null, token.span)),
-      TokenKind::Int(value) => Ok(AstExpression::new(ExprKind::Int { value }, token.span)),
-      TokenKind::Float(value) => Ok(AstExpression::new(ExprKind::Float { value }, token.span)),
-      TokenKind::String(value) => Ok(AstExpression::new(ExprKind::String { value }, token.span)),
+      TokenKind::Null => Ok(ParsedExpression::leaf(ExprKind::Null, token.span)),
+      TokenKind::Int(value) => Ok(ParsedExpression::leaf(ExprKind::Int { value }, token.span)),
+      TokenKind::Float(value) => Ok(ParsedExpression::leaf(
+        ExprKind::Float { value },
+        token.span,
+      )),
+      TokenKind::String(value) => Ok(ParsedExpression::leaf(
+        ExprKind::String { value },
+        token.span,
+      )),
       TokenKind::Identifier(name) => {
         validate_identifier(&name, token.span)?;
         if self
@@ -258,12 +323,17 @@ impl Parser {
           .is_some()
         {
           let (args, end_span) = self.parse_call_args()?;
-          Ok(AstExpression::new(
-            ExprKind::FunctionCall { name, args },
+          let serialized_depth = 3 + args.max_serialized_depth;
+          ParsedExpression::checked(
+            ExprKind::FunctionCall {
+              name,
+              args: args.expressions,
+            },
             token.span.join(end_span),
-          ))
+            serialized_depth,
+          )
         } else {
-          Ok(AstExpression::new(
+          Ok(ParsedExpression::leaf(
             ExprKind::Identifier { name },
             token.span,
           ))
@@ -281,22 +351,29 @@ impl Parser {
     }
   }
 
-  fn parse_array(&mut self, start_span: SourceSpan) -> Result<AstExpression, DiagnosticReport> {
-    let mut items = Vec::new();
+  fn parse_array(&mut self, start_span: SourceSpan) -> Result<ParsedExpression, DiagnosticReport> {
+    let mut items = ParsedSequence::default();
     if let Some(end) = self.consume_kind(|kind| matches!(kind, TokenKind::RBracket)) {
-      return Ok(AstExpression::new(
-        ExprKind::Array { items },
+      return ParsedExpression::checked(
+        ExprKind::Array {
+          items: items.expressions,
+        },
         start_span.join(end.span),
-      ));
+        3,
+      );
     }
 
     loop {
       items.push(self.parse_nested(start_span, |parser| parser.parse_or())?);
       if let Some(end) = self.consume_kind(|kind| matches!(kind, TokenKind::RBracket)) {
-        return Ok(AstExpression::new(
-          ExprKind::Array { items },
+        let serialized_depth = 3 + items.max_serialized_depth;
+        return ParsedExpression::checked(
+          ExprKind::Array {
+            items: items.expressions,
+          },
           start_span.join(end.span),
-        ));
+          serialized_depth,
+        );
       }
       self.expect_kind("expected comma in array literal", |kind| {
         matches!(kind, TokenKind::Comma)
@@ -304,8 +381,8 @@ impl Parser {
     }
   }
 
-  fn parse_call_args(&mut self) -> Result<(Vec<AstExpression>, SourceSpan), DiagnosticReport> {
-    let mut args = Vec::new();
+  fn parse_call_args(&mut self) -> Result<(ParsedSequence, SourceSpan), DiagnosticReport> {
+    let mut args = ParsedSequence::default();
     if let Some(end) = self.consume_kind(|kind| matches!(kind, TokenKind::RParen)) {
       return Ok((args, end.span));
     }
@@ -403,15 +480,21 @@ impl Parser {
   }
 }
 
-fn binary(left: AstExpression, op: BinaryOp, right: AstExpression) -> AstExpression {
-  let span = left.span.join(right.span);
-  AstExpression::new(
+fn binary(
+  left: ParsedExpression,
+  op: BinaryOp,
+  right: ParsedExpression,
+) -> Result<ParsedExpression, DiagnosticReport> {
+  let span = left.span().join(right.span());
+  let serialized_depth = 2 + left.serialized_depth.max(right.serialized_depth);
+  ParsedExpression::checked(
     ExprKind::Binary {
-      left: Box::new(left),
+      left: Box::new(left.ast),
       op,
-      right: Box::new(right),
+      right: Box::new(right.ast),
     },
     span,
+    serialized_depth,
   )
 }
 

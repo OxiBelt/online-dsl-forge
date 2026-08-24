@@ -57,6 +57,13 @@ must not panic on malformed input.
 Parsing enforces an internal recursion-depth budget for nested expressions and
 reports a diagnostic instead of exhausting the host stack.
 
+Parser-produced ASTs also stay below the default `serde_json` container-depth
+limit so every successful parse can be serialized and deserialized with the
+default configuration. Expressions whose AST would exceed that budget fail
+closed with an `AST depth limit exceeded` diagnostic. This parser guarantee
+does not constrain AST values constructed directly through the public Rust
+types.
+
 ## Canonical Formatting
 
 Canonical formatting emits a deterministic normalized expression string from an

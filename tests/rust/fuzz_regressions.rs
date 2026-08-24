@@ -10,9 +10,12 @@ struct Regression {
   target: &'static str,
 }
 
-/// Add every minimized reproducer here. The empty initial registry makes an
-/// unreviewed fixture fail closed instead of silently entering the tree.
-const REGISTERED_FIXTURES: &[Regression] = &[];
+/// Add every minimized reproducer here so an unreviewed fixture fails closed
+/// instead of silently entering the tree.
+const REGISTERED_FIXTURES: &[Regression] = &[Regression {
+  path: "dsl_expression/ast-json-depth-limit.dsl",
+  target: "dsl_expression",
+}];
 
 fn fixture_files(root: &Path, directory: &Path, output: &mut BTreeSet<String>) {
   for entry in std::fs::read_dir(directory).expect("regression directory should be readable") {
