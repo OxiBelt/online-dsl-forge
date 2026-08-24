@@ -322,6 +322,34 @@ fn fuzz_runner_matches_the_catalog_security_contract() {
     );
   }
 
+  let minimize = runner
+    .split_once("  minimize)\n")
+    .expect("fuzz runner should define minimize mode")
+    .1
+    .split_once("\n  report)")
+    .expect("minimize mode should end before report mode")
+    .0;
+  for expected in [
+    "head -z -n \"$MAX_ARTIFACT_FILES\"",
+    "timeout --signal=TERM --kill-after=15s 300s",
+    "--sanitizer address -r 255",
+    "\"-timeout=$FUZZ_TIMEOUT_SECONDS\"",
+    "\"-rss_limit_mb=$FUZZ_RSS_LIMIT_MB\"",
+    "\"-malloc_limit_mb=$FUZZ_MALLOC_LIMIT_MB\"",
+    "-detect_leaks=1",
+    "\"-artifact_prefix=$artifact_dir/\"",
+    "Minimization failed or timed out; retaining raw input",
+  ] {
+    assert!(
+      minimize.contains(expected),
+      "fuzz minimization must contain {expected}"
+    );
+  }
+  assert!(
+    !minimize.contains("-max_len="),
+    "fuzz minimization must not pass libFuzzer's incompatible -max_len option"
+  );
+
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;

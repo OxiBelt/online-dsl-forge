@@ -344,14 +344,16 @@ case "$mode" in
         -print0 | sort -z | head -z -n "$MAX_ARTIFACT_FILES"
     )
     for failing_input in "${failing_inputs[@]}"; do
+      # tmin only shrinks an already-bounded artifact. Passing -max_len makes
+      # its internal libFuzzer reinvocation configure the limit twice.
       if ! timeout --signal=TERM --kill-after=15s 300s \
         cargo "+$FUZZ_ASAN_NIGHTLY" fuzz tmin --sanitizer address -r 255 \
           "$target" "$failing_input" -- \
-          "-max_len=$max_input_bytes" \
           "-timeout=$FUZZ_TIMEOUT_SECONDS" \
           "-rss_limit_mb=$FUZZ_RSS_LIMIT_MB" \
           "-malloc_limit_mb=$FUZZ_MALLOC_LIMIT_MB" \
           -detect_leaks=1 \
+          "-artifact_prefix=$artifact_dir/" \
           >>"$failure_dir/tmin.log" 2>&1; then
         printf 'Minimization failed or timed out; retaining raw input: %s\n' \
           "$(basename -- "$failing_input")" >>"$failure_dir/tmin.log"
