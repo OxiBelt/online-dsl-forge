@@ -98,7 +98,7 @@ jobs:
           - name: stable
             toolchain: 1.98.0
           - name: asan
-            toolchain: nightly-2026-08-04
+            toolchain: nightly-2026-08-24
         fuzz_target:
           - dsl_expression
           - expression_pipeline
@@ -159,8 +159,8 @@ jobs:
 
       - name: Install Rust advisory tools
         run: |
-          cargo install cargo-audit --locked
-          cargo install cargo-deny --locked
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
 
       - name: Cargo audit
         run: cargo audit

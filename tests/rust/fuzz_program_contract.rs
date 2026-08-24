@@ -301,7 +301,7 @@ fn fuzz_runner_matches_the_catalog_security_contract() {
     "set -Eeuo pipefail",
     "umask 077",
     "FUZZ_STABLE_TOOLCHAIN=\"1.98.0\"",
-    "FUZZ_ASAN_NIGHTLY=\"nightly-2026-08-04\"",
+    "FUZZ_ASAN_NIGHTLY=\"nightly-2026-08-24\"",
     "CARGO_FUZZ_VERSION=\"0.13.2\"",
     "MAX_CACHED_CORPUS_FILES=8192",
     "MAX_CORPUS_BYTES=67108864",
@@ -390,7 +390,7 @@ fn fuzz_workflows_cover_every_target_and_profile_with_pinned_actions() {
   }));
   assert!(profiles.iter().any(|profile| {
     profile["name"].as_str() == Some("asan")
-      && profile["toolchain"].as_str() == Some("nightly-2026-08-04")
+      && profile["toolchain"].as_str() == Some("nightly-2026-08-24")
   }));
   let smoke_steps = workflow_steps(smoke, "smoke fuzz job");
   let smoke_run = workflow_step(smoke_steps, "Run bounded smoke target");
