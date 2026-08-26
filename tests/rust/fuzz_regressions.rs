@@ -12,10 +12,16 @@ struct Regression {
 
 /// Add every minimized reproducer here so an unreviewed fixture fails closed
 /// instead of silently entering the tree.
-const REGISTERED_FIXTURES: &[Regression] = &[Regression {
-  path: "dsl_expression/ast-json-depth-limit.dsl",
-  target: "dsl_expression",
-}];
+const REGISTERED_FIXTURES: &[Regression] = &[
+  Regression {
+    path: "dsl_expression/ast-json-depth-limit.dsl",
+    target: "dsl_expression",
+  },
+  Regression {
+    path: "dsl_expression/ast-json-float-roundtrip.dsl",
+    target: "dsl_expression",
+  },
+];
 
 fn fixture_files(root: &Path, directory: &Path, output: &mut BTreeSet<String>) {
   for entry in std::fs::read_dir(directory).expect("regression directory should be readable") {

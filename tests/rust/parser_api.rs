@@ -3,12 +3,28 @@ use online_dsl_forge::{
 };
 use serde_json::json;
 
+const LONG_DECIMAL_FLOAT: &str = "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001";
+
 fn assert_default_json_round_trip(input: &str) {
   let ast = parse_expression(input).expect("boundary expression should parse");
   let serialized = serde_json::to_vec(&ast).expect("AST should serialize");
   let decoded: AstExpression =
     serde_json::from_slice(&serialized).expect("serialized AST should deserialize");
   assert_eq!(ast, decoded, "AST JSON round trip should be exact");
+}
+
+#[test]
+fn parser_api_round_trips_long_decimal_float_exactly() {
+  let ast = parse_expression(LONG_DECIMAL_FLOAT).expect("long decimal float should parse");
+  let ExprKind::Float { value } = ast.kind else {
+    panic!("long decimal float should produce a float AST node");
+  };
+  assert_eq!(
+    value.to_bits(),
+    (1e-97_f64).to_bits(),
+    "DSL float parsing should select the nearest f64 value"
+  );
+  assert_default_json_round_trip(LONG_DECIMAL_FLOAT);
 }
 
 fn assert_ast_depth_error(input: &str) {
