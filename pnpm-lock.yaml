@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@typescriptprime/parsing':
-        specifier: ^2.0.1
-        version: 2.0.1
+        specifier: ^2.0.2
+        version: 2.0.2
       semver:
         specifier: ^7.8.5
         version: 7.8.5
@@ -476,8 +476,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@typescriptprime/parsing@2.0.1':
-    resolution: {integrity: sha512-Epw6taurk1a9AEI0wrm9j/AzBbXj/UALZtYGxW4Y8RHhcsNgUKNun0ZIrm5S3BMf4Tw4Dcj8SPxmkWQhBlesyQ==}
+  '@typescriptprime/parsing@2.0.2':
+    resolution: {integrity: sha512-16vcUKjympMWEYp08ODLstRcdKc/BpbbAxYUmJdesEFRwFFj4/t9AB/LnTxISoQ2yaqzT98GxQvXjkO8Uo3z/A==}
 
   es-toolkit@1.51.0:
     resolution: {integrity: sha512-zC2lQGkM7QX+Gm6iM3+WIdZJzthsEd14LvRNJneSO2hzyz/zNBENR8+YXWo1cKxgPBtV6ksPYHELbcwBRzmdCw==}
@@ -755,7 +755,7 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  '@typescriptprime/parsing@2.0.1':
+  '@typescriptprime/parsing@2.0.2':
     dependencies:
       es-toolkit: 1.51.0
 
