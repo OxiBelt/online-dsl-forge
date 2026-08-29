@@ -53,8 +53,10 @@ external callbacks or performs I/O.
 
 Successful analysis must retain the parsed AST, remain within static profile
 bounds, and keep capability tickets, metadata, and precompiled regex literals
-aligned. Repeated compile and evaluation outcomes must be deterministic, and
-canonical formatting must preserve the value or fail-closed error class.
+aligned. Regex literals retain every admitted source occurrence, while the
+compiled cache contains exactly one entry per unique flavor and pattern pair.
+Repeated compile and evaluation outcomes must be deterministic, and canonical
+formatting must preserve the value or fail-closed error class.
 
 ### `rulepack_render`
 

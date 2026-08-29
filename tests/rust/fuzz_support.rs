@@ -335,7 +335,16 @@ fn exercise_selected_analysis(ast: &AstExpression, source: &str, selectors: &[u8
         left.required_capabilities(),
         "required capabilities and metadata must stay aligned"
       );
-      assert_eq!(left.regex_cache().len(), left.regex_literals().len());
+      let regex_keys = left
+        .regex_literals()
+        .iter()
+        .map(|literal| (literal.flavor, literal.pattern.as_str()))
+        .collect::<BTreeSet<_>>();
+      assert_eq!(
+        left.regex_cache().len(),
+        regex_keys.len(),
+        "regex cache entries must match unique flavor and pattern pairs"
+      );
       for literal in left.regex_literals() {
         assert!(
           left
