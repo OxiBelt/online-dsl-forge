@@ -21,6 +21,10 @@ const REGISTERED_FIXTURES: &[Regression] = &[
     path: "dsl_expression/ast-json-float-roundtrip.dsl",
     target: "dsl_expression",
   },
+  Regression {
+    path: "dsl_expression/ast-json-non-finite-float.dsl",
+    target: "dsl_expression",
+  },
 ];
 
 fn fixture_files(root: &Path, directory: &Path, output: &mut BTreeSet<String>) {

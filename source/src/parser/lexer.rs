@@ -171,10 +171,12 @@ impl Lexer<'_> {
     let raw = &self.input[start..self.position];
     if is_float {
       match raw.parse::<f64>() {
-        Ok(value) => self
-          .tokens
-          .push(Token::new(TokenKind::Float(value), start, self.position)),
-        Err(_) => self.diagnostics.push(Diagnostic::new(
+        Ok(value) if value.is_finite() => {
+          self
+            .tokens
+            .push(Token::new(TokenKind::Float(value), start, self.position))
+        }
+        Ok(_) | Err(_) => self.diagnostics.push(Diagnostic::new(
           "invalid float literal",
           SourceSpan::new(start, self.position),
         )),

@@ -39,8 +39,9 @@ canonical formatting, and reparsing. Token, AST, and diagnostic spans must stay
 ordered, in bounds, and on UTF-8 character boundaries. Canonical formatting
 must be idempotent. Successful parses must also round-trip through the default
 `serde_json` recursion limit; more deeply nested AST shapes are rejected by the
-parser. Finite floats must retain their exact `f64` bits across that JSON
-round-trip, including decimal values that require the precise float parser.
+parser. Parsed floats must be finite and must retain their exact `f64` bits
+across that JSON round-trip, including decimal values that require the precise
+float parser.
 
 ### `expression_pipeline`
 

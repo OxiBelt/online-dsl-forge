@@ -27,6 +27,33 @@ fn parser_api_round_trips_long_decimal_float_exactly() {
   assert_default_json_round_trip(LONG_DECIMAL_FLOAT);
 }
 
+#[test]
+fn parser_api_accepts_only_finite_float_literals() {
+  let finite = format!("1{}.0", "0".repeat(308));
+  let ast = parse_expression(&finite).expect("1e308 should remain a finite float");
+  let ExprKind::Float { value } = ast.kind else {
+    panic!("finite boundary should produce a float AST node");
+  };
+  assert!(value.is_finite(), "accepted float literals must be finite");
+  assert_eq!(value.to_bits(), (1e308_f64).to_bits());
+  assert_default_json_round_trip(&finite);
+
+  let overflow = format!("2{}.0", "0".repeat(308));
+  let lex_error =
+    online_dsl_forge::lexer::tokenize(&overflow).expect_err("2e308 should fail lexing");
+  assert_eq!(lex_error.len(), 1);
+  assert_eq!(lex_error[0].message, "invalid float literal");
+  assert_eq!(lex_error[0].span, SourceSpan::new(0, overflow.len()));
+
+  let parse_error = parse_expression(&overflow).expect_err("2e308 should fail parsing");
+  assert_eq!(parse_error.diagnostics.len(), 1);
+  assert_eq!(parse_error.diagnostics[0].message, "invalid float literal");
+  assert_eq!(
+    parse_error.diagnostics[0].span,
+    SourceSpan::new(0, overflow.len())
+  );
+}
+
 fn assert_ast_depth_error(input: &str) {
   let error = parse_expression(input).expect_err("over-depth expression should fail");
   assert_eq!(error.diagnostics.len(), 1);

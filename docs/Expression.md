@@ -16,6 +16,8 @@ false
 ```
 
 Strings support `\\`, `\"`, `\'`, `\n`, `\r`, and `\t` escapes.
+Float literals must resolve to finite `f64` values. Decimal literals outside
+that range fail with an `invalid float literal` diagnostic.
 
 ## Identifiers
 

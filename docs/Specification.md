@@ -51,9 +51,12 @@ The public AST is serializable with `serde`. Serialized AST shape is part of the
 public compatibility surface and should change only with documentation and
 tests.
 
-Finite floating-point values in serialized ASTs round-trip through
-`serde_json` without changing their `f64` bit representation. This guarantees
-binary floating-point fidelity, not arbitrary-precision JSON numbers.
+The parser accepts float literals only when they resolve to finite `f64`
+values; out-of-range decimal literals fail closed with an
+`invalid float literal` diagnostic. Accepted floating-point values in
+serialized ASTs round-trip through `serde_json` without changing their `f64`
+bit representation. This guarantees binary floating-point fidelity, not
+arbitrary-precision JSON numbers.
 
 Parser diagnostics should include a stable message and source span. Diagnostics
 must not panic on malformed input.
