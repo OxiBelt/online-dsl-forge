@@ -38,7 +38,9 @@ trusted construction path; the infallible formatter and text renderer return
 an empty string when work exceeds their default budgets. Runtime value depth is
 capped at 128, crate-owned input-dependent handlers charge the cumulative
 runtime budget, non-finite results fail closed, and JSON integer-form tokens
-outside `i64` are rejected rather than rounded to floats.
+outside `i64` are rejected rather than rounded to floats. Runtime string limits
+apply throughout admitted value graphs, and `Value::try_into_json` provides a
+fallible, iterative reverse JSON conversion with the same default graph limits.
 
 ## Quick Start
 

@@ -21,7 +21,7 @@ that range fail with an `invalid float literal` diagnostic.
 
 The default parser accepts at most 1 MiB of source, 262,144 tokens, 1 MiB of
 decoded scalar data, 65,536 AST nodes, and 65,536 items in any array or call.
-Embeddings can choose lower bounds with `ParseLimits` and
+Embeddings can choose explicit bounds with `ParseLimits` and
 `parse_expression_with_limits`.
 
 ## Identifiers
@@ -40,7 +40,8 @@ The same rules apply to identifier, member, function, method, and expression
 function parameter names in ASTs constructed through the public Rust types.
 The fallible formatter and semantic analyzer reject names that the lexer could
 not produce, including reserved words. They also reject non-finite `Float`
-values in directly constructed ASTs.
+values in directly constructed ASTs. Checked formatting admits scalar bytes
+before scanning identifier syntax.
 
 ## Access and Calls
 
@@ -65,7 +66,8 @@ closed.
 
 `Analyzer::with_regex_admission_limits` bounds unique literal patterns, their
 aggregate source bytes, and each compiled regex automaton before it is retained
-in the verified program.
+in the verified program. Oversized literals are rejected before lowering or
+cache-key allocation copies them.
 
 Non-WAF hosts should start with `SecurityProfile::generic_safe()` for ordinary
 filtering and decision expressions over host-provided JSON-like objects.

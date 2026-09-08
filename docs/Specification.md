@@ -63,7 +63,7 @@ must not panic on malformed input.
 
 `parse_expression` and `lexer::tokenize` apply `ParseLimits::default()`.
 `parse_expression_with_limits` and `lexer::tokenize_with_limits` let an
-embedding select lower limits. Checks occur before retaining the next token,
+embedding select explicit limits. Checks occur before retaining the next token,
 decoded scalar, AST node, diagnostic, or array/call item. Limits are inclusive.
 
 | `ParseLimits` field | Default |
@@ -109,7 +109,9 @@ the same defaults, and returns an empty string if a directly constructed AST
 exceeds them. Use the fallible entry point when the caller needs a diagnostic.
 Both formatter entry points also validate every identifier, member, function,
 and method name against the lexer grammar and reserved-word list before emitting
-source, and reject non-finite floats in directly constructed ASTs.
+source, and reject non-finite floats in directly constructed ASTs. The formatter
+charges scalar input against its output-byte limit before scanning name syntax,
+so an oversized public AST field is rejected before linear validation work.
 
 ## Semantic Validation
 
@@ -196,7 +198,7 @@ the complete schema with these defaults:
 | `max_diagnostics` | 1,024 |
 | `max_total_diagnostic_bytes` | 1 MiB |
 
-Hosts can install lower bounds with
+Hosts can install explicit bounds with
 `RuntimeSchema::with_expression_function_limits`. Semantic analysis revalidates
 the aggregate limits and syntax so schemas received through serialization do
 not bypass registration checks. Body depth remains hard-capped at 128, each
@@ -221,7 +223,7 @@ receiver-method expressions such as `Request.Http.Path.containsAny("set")`.
 per set, 4 KiB per pattern, and 64 MiB of aggregate pattern source. Regex
 patterns compile through `RegexBuilder` with a 256 KiB approximate compiled
 size limit per pattern and a 64 MiB aggregate projection across regex patterns.
-Hosts can install lower bounds with `RuntimePatternSets::compile_with_limits`.
+Hosts can install explicit bounds with `RuntimePatternSets::compile_with_limits`.
 
 `SecurityProfile::generic_safe()` is the default non-WAF embedding profile. It
 keeps `RegexPolicy::DynamicWithBudget` for compatibility, requires
@@ -233,8 +235,9 @@ derive from it with `with_regex_policy(RegexPolicy::LiteralOnlyPrecompiled)`,
 `RegexAdmissionLimits::default()` admits at most 256 unique `(flavor, pattern)`
 pairs and 1 MiB of aggregate pattern source. Each compilation uses a 256 KiB
 `RegexBuilder` approximate size limit before cache retention, giving the default
-cache an approximate 64 MiB compiled-size ceiling. Hosts can select lower bounds
-with `Analyzer::with_regex_admission_limits`.
+cache an approximate 64 MiB compiled-size ceiling. Hosts can select explicit bounds
+with `Analyzer::with_regex_admission_limits`. Literal source bytes are admitted
+before semantic lowering or cache-key retention copies the pattern.
 
 `SecurityProfile::generic_transform()` is for non-WAF transformation and
 normalization workloads. It keeps the same deterministic and fail-closed
@@ -287,10 +290,14 @@ The runtime:
   dynamic registry
 - passes a `RuntimeCallContext` to context-aware function and method handlers so
   they can inspect the active security profile and use verified precompiled
-  regex literals or charge input-dependent handler work before performing it
+  regex literals, preflight projected string results, or charge input-dependent
+  handler work before performing it
 - enforces step and recursion-depth limits
 - validates every input, local, member copy, handler result, operator result,
   intermediate value, and returned value before further use
+- applies `EvalLimits::max_string_bytes` to every string in those admitted
+  graphs, checks string literals and concatenation before allocation, and
+  charges built-in ASCII case conversion work before copying
 - meters value depth, nodes, collection items, logical bytes, and cumulative
   logical bytes and crate-owned handler work processed by one evaluation
 - fails closed on unknown names, type errors, arity errors, arithmetic
@@ -337,6 +344,12 @@ capped at 128 even if an explicit policy requests more, and direct
 graph limits. JSON tokens written in integer form outside the supported `i64`
 range fail instead of converting to a lossy `f64`, including values above
 `u64::MAX`; fractional and exponent-form JSON numbers remain floats.
+
+`Value::try_into_json` applies the same default graph limits in the reverse
+direction, converts iteratively, and rejects non-finite floats. The existing
+`serde_json::Value::from(Value)` conversion remains an infallible compatibility
+adapter and returns JSON `null` when the checked conversion rejects a directly
+constructed value. Call the fallible method when rejection details matter.
 
 `MapRuntime` implements `RuntimeContext::get_variable_borrowed`, which lets the
 evaluator validate before cloning. Existing custom contexts remain compatible
