@@ -41,6 +41,19 @@ runtime budget, non-finite results fail closed, and JSON integer-form tokens
 outside `i64` are rejected rather than rounded to floats. Runtime string limits
 apply throughout admitted value graphs, and `Value::try_into_json` provides a
 fallible, iterative reverse JSON conversion with the same default graph limits.
+Direct Serde serialization also rejects non-finite AST and runtime floats.
+`MapRuntime::try_new_with_limits` meters a complete binding object, including
+binding keys and aggregate shape; `MapRuntime::new` is intended for trusted,
+host-bounded values.
+
+Decoded runtime schemas must keep map lookup names, kinds, arities, argument
+metadata, operator spellings, and expression-function scope consistent with
+their embedded metadata. Semantic analysis applies the same integrity check to
+programmatically assembled schemas, and evaluation matches verified tickets to
+the actual dispatch identity. Expression-function limits are host policy rather
+than serialized schema data: decoded schemas use secure defaults, after which a
+host can apply explicit limits. Hosts must separately bound the raw bytes and
+allocation behavior of their chosen Serde decoder.
 
 ## Quick Start
 

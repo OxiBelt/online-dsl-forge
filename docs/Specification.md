@@ -49,7 +49,10 @@ source text.
 
 The public AST is serializable with `serde`. Serialized AST shape is part of the
 public compatibility surface and should change only with documentation and
-tests.
+tests. Direct serialization and deserialization reject non-finite float values.
+Serde decoders allocate their input representation before the crate can perform
+post-decode graph and schema validation, so hosts must bound raw serialized
+input bytes and decoder allocation separately.
 
 The parser accepts float literals only when they resolve to finite `f64`
 values; out-of-range decimal literals fail closed with an
@@ -199,12 +202,23 @@ the complete schema with these defaults:
 | `max_total_diagnostic_bytes` | 1 MiB |
 
 Hosts can install explicit bounds with
-`RuntimeSchema::with_expression_function_limits`. Semantic analysis revalidates
-the aggregate limits and syntax so schemas received through serialization do
-not bypass registration checks. Body depth remains hard-capped at 128, each
-diagnostic message at 1 KiB, and retained or cloned expression-function
-diagnostics at 1,024 messages and 1 MiB even when a schema requests higher
-settings.
+`RuntimeSchema::with_expression_function_limits`. These limits are host policy:
+they are omitted when a schema is serialized, ignored if present during
+deserialization, and reset to secure defaults in every decoded schema. A host
+that needs custom policy applies it after decoding. Semantic analysis
+revalidates the aggregate limits and syntax. Body depth remains hard-capped at
+128, each diagnostic message at 1 KiB, and retained or cloned
+expression-function diagnostics at 1,024 messages and 1 MiB even when trusted
+host policy requests higher settings.
+
+Schema admission binds lookup identity to embedded metadata. Deserialization
+requires variable and expression-function map keys to match their embedded
+names, expression-function scope to match its map, and capability name, kind,
+arity, argument count, and regex-argument indexes to match the map entry.
+Operator entries must also use a supported operator spelling and the fixed
+operator arity. Semantic analysis repeats this check for schemas assembled
+through Rust APIs. Evaluation verifies that every capability ticket matches the
+actual function, method, or operator dispatch tuple before executing it.
 
 `RuntimeSchema::oxirule_waf()` and the `SecurityProfile::oxirule_waf_*`
 constructors provide the behavior-preserving OxiRule WAF migration surface. The
@@ -219,11 +233,16 @@ receiver-method expressions such as `Request.Http.Path.containsAny("set")`.
 `RuntimeSchema::oxirule_waf()` does not register the stale
 `PatternSets.contains(name, value)` helper alias.
 
-`RuntimePatternSetLimits::default()` admits at most 256 sets, 1,024 patterns
-per set, 4 KiB per pattern, and 64 MiB of aggregate pattern source. Regex
-patterns compile through `RegexBuilder` with a 256 KiB approximate compiled
-size limit per pattern and a 64 MiB aggregate projection across regex patterns.
-Hosts can install explicit bounds with `RuntimePatternSets::compile_with_limits`.
+`RuntimePatternSetLimits::default()` admits at most 256 sets, 4 KiB per set
+name, 1 MiB of aggregate set names, 1,024 patterns per set, 4 KiB per pattern,
+and 64 MiB of aggregate pattern source. Name budgets are checked before map
+lookup, retention, or regex compilation. Regex patterns compile through
+`RegexBuilder` with a 256 KiB approximate compiled size limit per pattern and a
+64 MiB aggregate projection across regex patterns. Hosts can install explicit
+bounds with `RuntimePatternSets::compile_with_limits`. The convenience
+`RuntimePatternSetConfig::contains` and `RuntimePatternSetConfig::regex`
+constructors collect their input iterators, so callers must provide finite,
+host-bounded configuration data.
 
 `SecurityProfile::generic_safe()` is the default non-WAF embedding profile. It
 keeps `RegexPolicy::DynamicWithBudget` for compatibility, requires
@@ -324,7 +343,9 @@ complexity consume the cumulative work budget.
 
 Runtime values are JSON-compatible: null, booleans, integers, finite floats,
 strings, arrays, and objects. Floating arithmetic and handler results that
-produce infinity or NaN fail admission instead of becoming JSON `null`.
+produce infinity or NaN fail admission instead of becoming JSON `null`. Direct
+Serde serialization of `Value` and float-bearing AST nodes also rejects
+non-finite values.
 
 | `RuntimeResourceLimits` field | Default |
 | --- | ---: |
@@ -337,9 +358,12 @@ produce infinity or NaN fail admission instead of becoming JSON `null`.
 Logical bytes include one tag byte per node plus string payloads and object
 keys. `MapRuntime::from_json_bindings` applies these defaults while converting
 JSON iteratively, and `MapRuntime::from_json_bindings_with_limits` accepts an
-explicit policy. `MapRuntime::try_new_with_limits` validates existing `Value`
-bindings before constructing a context. The effective value-depth limit is
-capped at 128 even if an explicit policy requests more, and direct
+explicit policy. `MapRuntime::try_new_with_limits` validates existing bindings
+as one object graph before constructing a context, including the root, binding
+count, key bytes, aggregate nodes, and aggregate payload bytes.
+`MapRuntime::new` is the unchecked constructor for trusted, host-bounded
+bindings. The effective value-depth limit is capped at 128 even if an explicit
+policy requests more, and direct
 `Value::try_from(serde_json::Value)` conversion uses the same secure default
 graph limits. JSON tokens written in integer form outside the supported `i64`
 range fail instead of converting to a lossy `f64`, including values above
