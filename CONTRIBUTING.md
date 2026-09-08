@@ -78,7 +78,7 @@ Versioning and release automation use Node.js `24.20.0` and the exact pnpm
 version recorded in `package.json` (`12.3.4`). Install pnpm directly, for
 example with `npm install --global pnpm@12.3.4`, and ensure `pnpm --version`
 reports that version. The current Corepack bootstrap is incompatible with
-pnpm 12's native executable; CI uses the pinned `pnpm/action-setup` action.
+pnpm 12's native executable; CI uses the pinned `pnpm/setup` action.
 Dependency refreshes retain pnpm's 24-hour minimum release age and upstream
 version constraints for indirect dependencies.
 
