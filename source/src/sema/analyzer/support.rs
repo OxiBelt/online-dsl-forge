@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use crate::parser::{AstExpression, ExprKind, SourceSpan};
 
 use crate::sema::profile::{BodyNeedSummary, BodyTarget};
@@ -148,11 +146,18 @@ pub(super) struct FunctionCallSite {
 
 pub(super) fn function_calls(expression: &AstExpression) -> Vec<FunctionCallSite> {
   let mut calls = Vec::new();
-  collect_function_calls(expression, &mut calls);
+  let mut stack = vec![expression];
+  while let Some(expression) = stack.pop() {
+    collect_function_calls(expression, &mut calls, &mut stack);
+  }
   calls
 }
 
-fn collect_function_calls(expression: &AstExpression, calls: &mut Vec<FunctionCallSite>) {
+fn collect_function_calls<'a>(
+  expression: &'a AstExpression,
+  calls: &mut Vec<FunctionCallSite>,
+  stack: &mut Vec<&'a AstExpression>,
+) {
   match &expression.kind {
     ExprKind::FunctionCall { name, args } => {
       calls.push(FunctionCallSite {
@@ -160,27 +165,27 @@ fn collect_function_calls(expression: &AstExpression, calls: &mut Vec<FunctionCa
         arity: args.len(),
         span: expression.span,
       });
-      for arg in args {
-        collect_function_calls(arg, calls);
+      for arg in args.iter().rev() {
+        stack.push(arg);
       }
     }
     ExprKind::Array { items } => {
-      for item in items {
-        collect_function_calls(item, calls);
+      for item in items.iter().rev() {
+        stack.push(item);
       }
     }
     ExprKind::Member { receiver, .. } | ExprKind::Unary { expr: receiver, .. } => {
-      collect_function_calls(receiver, calls)
+      stack.push(receiver)
     }
     ExprKind::MethodCall { receiver, args, .. } => {
-      collect_function_calls(receiver, calls);
-      for arg in args {
-        collect_function_calls(arg, calls);
+      for arg in args.iter().rev() {
+        stack.push(arg);
       }
+      stack.push(receiver);
     }
     ExprKind::Binary { left, right, .. } => {
-      collect_function_calls(left, calls);
-      collect_function_calls(right, calls);
+      stack.push(right);
+      stack.push(left);
     }
     ExprKind::Null
     | ExprKind::Bool { .. }
@@ -188,79 +193,6 @@ fn collect_function_calls(expression: &AstExpression, calls: &mut Vec<FunctionCa
     | ExprKind::Float { .. }
     | ExprKind::String { .. }
     | ExprKind::Identifier { .. } => {}
-  }
-}
-
-pub(super) fn substitute_expression(
-  expression: &AstExpression,
-  replacements: &BTreeMap<String, AstExpression>,
-) -> AstExpression {
-  match &expression.kind {
-    ExprKind::Identifier { name } => replacements
-      .get(name)
-      .cloned()
-      .unwrap_or_else(|| expression.clone()),
-    ExprKind::Array { items } => AstExpression::new(
-      ExprKind::Array {
-        items: items
-          .iter()
-          .map(|item| substitute_expression(item, replacements))
-          .collect(),
-      },
-      expression.span,
-    ),
-    ExprKind::Member { receiver, name } => AstExpression::new(
-      ExprKind::Member {
-        receiver: Box::new(substitute_expression(receiver, replacements)),
-        name: name.clone(),
-      },
-      expression.span,
-    ),
-    ExprKind::FunctionCall { name, args } => AstExpression::new(
-      ExprKind::FunctionCall {
-        name: name.clone(),
-        args: args
-          .iter()
-          .map(|arg| substitute_expression(arg, replacements))
-          .collect(),
-      },
-      expression.span,
-    ),
-    ExprKind::MethodCall {
-      receiver,
-      name,
-      args,
-    } => AstExpression::new(
-      ExprKind::MethodCall {
-        receiver: Box::new(substitute_expression(receiver, replacements)),
-        name: name.clone(),
-        args: args
-          .iter()
-          .map(|arg| substitute_expression(arg, replacements))
-          .collect(),
-      },
-      expression.span,
-    ),
-    ExprKind::Unary { op, expr } => AstExpression::new(
-      ExprKind::Unary {
-        op: *op,
-        expr: Box::new(substitute_expression(expr, replacements)),
-      },
-      expression.span,
-    ),
-    ExprKind::Binary { left, op, right } => AstExpression::new(
-      ExprKind::Binary {
-        left: Box::new(substitute_expression(left, replacements)),
-        op: *op,
-        right: Box::new(substitute_expression(right, replacements)),
-      },
-      expression.span,
-    ),
-    ExprKind::Null
-    | ExprKind::Bool { .. }
-    | ExprKind::Int { .. }
-    | ExprKind::Float { .. }
-    | ExprKind::String { .. } => expression.clone(),
   }
 }
 

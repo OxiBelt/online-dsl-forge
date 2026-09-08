@@ -1,6 +1,8 @@
 mod capability_check;
 mod context;
 mod defaults;
+mod evaluator;
+mod json;
 mod operators;
 mod pattern_sets;
 
@@ -10,19 +12,20 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::parser::{BinaryOp, SourceSpan, UnaryOp};
-use crate::sema::{VerifiedExprKindRef, VerifiedExpression, VerifiedProgram};
+use crate::sema::VerifiedProgram;
 
 use crate::compile::{
   CapabilityKind, CapabilityMeta, CapabilityTicket, CompiledExpression, RuntimeSchema,
 };
-use crate::value::Value;
+use crate::value::{
+  DEFAULT_MAX_VALUE_BYTES, DEFAULT_MAX_VALUE_ITEMS, DEFAULT_MAX_VALUE_NODES, MAX_VALUE_DEPTH,
+  Value, ValueMetrics,
+};
 use capability_check::verify_runtime_capabilities;
 pub use context::RuntimeCallContext;
 pub use defaults::default_registry;
-use operators::{
-  add_values, binary_op_from_name, compare_values, expect_bool, numeric_arithmetic,
-  unary_op_from_name,
-};
+use json::convert_json_with_limits;
+use operators::{binary_op_from_name, unary_op_from_name};
 pub use pattern_sets::{
   RuntimePatternSetConfig, RuntimePatternSetError, RuntimePatternSetKind, RuntimePatternSetLimits,
   RuntimePatternSets, oxirule_pattern_set_registry, register_oxirule_pattern_set_methods,
@@ -71,6 +74,37 @@ pub struct EvalLimits {
   pub max_depth: usize,
   pub max_string_bytes: usize,
   pub max_array_items: usize,
+}
+
+/// Limits for values admitted to and produced by the runtime.
+///
+/// Each individual graph is checked before it is cloned, compared, or passed
+/// to a handler. `max_total_value_bytes` is charged for every graph the
+/// evaluator processes or returns, which bounds repeated accesses as well as
+/// intermediate results. Limits are inclusive: a value exactly at a limit is
+/// accepted. A zero graph limit rejects every root value deterministically.
+/// Value depth has a hard ceiling of 128 even when a larger custom value is
+/// supplied, keeping clone, comparison, serialization, and teardown paths
+/// within a stack-safe envelope.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct RuntimeResourceLimits {
+  pub max_value_depth: usize,
+  pub max_value_nodes: usize,
+  pub max_value_items: usize,
+  pub max_value_bytes: usize,
+  pub max_total_value_bytes: usize,
+}
+
+impl Default for RuntimeResourceLimits {
+  fn default() -> Self {
+    Self {
+      max_value_depth: MAX_VALUE_DEPTH,
+      max_value_nodes: DEFAULT_MAX_VALUE_NODES,
+      max_value_items: DEFAULT_MAX_VALUE_ITEMS,
+      max_value_bytes: DEFAULT_MAX_VALUE_BYTES,
+      max_total_value_bytes: 64 * 1024 * 1024,
+    }
+  }
 }
 
 impl Default for EvalLimits {
@@ -367,6 +401,13 @@ impl DynamicRegistry {
 
 pub trait RuntimeContext {
   fn get_variable(&self, name: &str) -> Option<Value>;
+
+  /// Borrow a host value when possible so the evaluator can validate it before
+  /// cloning it. Existing contexts only need to implement `get_variable`.
+  fn get_variable_borrowed(&self, _name: &str) -> Option<&Value> {
+    None
+  }
+
   fn registry(&self) -> &DynamicRegistry;
 }
 
@@ -374,6 +415,14 @@ pub trait RuntimeContext {
 pub struct MapRuntime {
   variables: BTreeMap<String, Value>,
   registry: DynamicRegistry,
+}
+
+impl Drop for MapRuntime {
+  fn drop(&mut self) {
+    for value in std::mem::take(&mut self.variables).into_values() {
+      value.drain_iteratively();
+    }
+  }
 }
 
 impl MapRuntime {
@@ -384,16 +433,45 @@ impl MapRuntime {
     }
   }
 
+  /// Construct a map runtime after checking every host binding against
+  /// `resource_limits`.
+  pub fn try_new_with_limits(
+    variables: BTreeMap<String, Value>,
+    registry: DynamicRegistry,
+    resource_limits: RuntimeResourceLimits,
+  ) -> Result<Self, EvalError> {
+    let validation_error = variables
+      .values()
+      .find_map(|value| validate_value(value, resource_limits, SourceSpan::default()).err());
+    if let Some(error) = validation_error {
+      for value in variables.into_values() {
+        value.drain_iteratively();
+      }
+      return Err(error);
+    }
+    Ok(Self::new(variables, registry))
+  }
+
   pub fn from_json_bindings(bindings: serde_json::Value) -> Result<Self, EvalError> {
-    let Value::Object(variables) = Value::try_from(bindings)
-      .map_err(|error| EvalError::new(error.to_string(), SourceSpan::default()))?
-    else {
-      return Err(EvalError::new(
-        "bindings must be a JSON object",
-        SourceSpan::default(),
-      ));
+    Self::from_json_bindings_with_limits(bindings, RuntimeResourceLimits::default())
+  }
+
+  pub fn from_json_bindings_with_limits(
+    bindings: serde_json::Value,
+    resource_limits: RuntimeResourceLimits,
+  ) -> Result<Self, EvalError> {
+    let value = convert_json_with_limits(bindings, resource_limits)?;
+    let variables = match value {
+      Value::Object(variables) => variables,
+      other => {
+        other.drain_iteratively();
+        return Err(EvalError::new(
+          "bindings must be a JSON object",
+          SourceSpan::default(),
+        ));
+      }
     };
-    Ok(Self::new(variables, default_registry()))
+    Self::try_new_with_limits(variables, default_registry(), resource_limits)
   }
 
   pub fn schema(&self) -> RuntimeSchema {
@@ -410,6 +488,10 @@ impl RuntimeContext for MapRuntime {
     self.variables.get(name).cloned()
   }
 
+  fn get_variable_borrowed(&self, name: &str) -> Option<&Value> {
+    self.variables.get(name)
+  }
+
   fn registry(&self) -> &DynamicRegistry {
     &self.registry
   }
@@ -420,7 +502,26 @@ pub fn evaluate(
   context: &dyn RuntimeContext,
   limits: EvalLimits,
 ) -> Result<Value, EvalError> {
-  evaluate_verified(expression.verified_program(), context, limits)
+  evaluate_with_resource_limits(
+    expression,
+    context,
+    limits,
+    RuntimeResourceLimits::default(),
+  )
+}
+
+pub fn evaluate_with_resource_limits(
+  expression: &CompiledExpression,
+  context: &dyn RuntimeContext,
+  limits: EvalLimits,
+  resource_limits: RuntimeResourceLimits,
+) -> Result<Value, EvalError> {
+  evaluate_verified_with_resource_limits(
+    expression.verified_program(),
+    context,
+    limits,
+    resource_limits,
+  )
 }
 
 pub fn evaluate_verified(
@@ -428,291 +529,142 @@ pub fn evaluate_verified(
   context: &dyn RuntimeContext,
   limits: EvalLimits,
 ) -> Result<Value, EvalError> {
-  verify_runtime_capabilities(program, context.registry())?;
-  let mut state = EvalState {
-    limits,
-    steps: 0,
-    program,
-    locals: Vec::new(),
-  };
-  state.eval(program.root(), context, 0)
+  evaluate_verified_with_resource_limits(program, context, limits, RuntimeResourceLimits::default())
 }
 
-struct EvalState<'a> {
+pub fn evaluate_verified_with_resource_limits(
+  program: &VerifiedProgram,
+  context: &dyn RuntimeContext,
   limits: EvalLimits,
-  steps: usize,
-  program: &'a VerifiedProgram,
-  locals: Vec<BTreeMap<String, Value>>,
+  resource_limits: RuntimeResourceLimits,
+) -> Result<Value, EvalError> {
+  verify_runtime_capabilities(program, context.registry())?;
+  evaluator::evaluate(program, context, limits, resource_limits)
 }
 
-struct ExpressionFunctionFrame<'a> {
-  name: &'a str,
-  params: &'a [String],
-  args: &'a [VerifiedExpression],
-  body: &'a VerifiedExpression,
+pub(super) fn validate_value(
+  value: &Value,
+  limits: RuntimeResourceLimits,
   span: SourceSpan,
+) -> Result<ValueMetrics, EvalError> {
+  let mut metrics = ValueMetrics::default();
+  let mut pending = vec![(value, 1_usize)];
+
+  while let Some((value, depth)) = pending.pop() {
+    metrics.nodes = checked_value_metric(metrics.nodes, 1, "node", span)?;
+    if metrics.nodes > limits.max_value_nodes {
+      return Err(EvalError::new("value graph node limit exceeded", span));
+    }
+    metrics.bytes = checked_value_metric(metrics.bytes, 1, "byte", span)?;
+    if metrics.bytes > limits.max_value_bytes {
+      return Err(EvalError::new("value graph byte limit exceeded", span));
+    }
+    metrics.depth = metrics.depth.max(depth);
+    if metrics.depth > limits.max_value_depth.min(MAX_VALUE_DEPTH) {
+      return Err(EvalError::new("value graph depth limit exceeded", span));
+    }
+
+    match value {
+      Value::String(value) => {
+        metrics.bytes = checked_value_metric(metrics.bytes, value.len(), "byte", span)?;
+        if metrics.bytes > limits.max_value_bytes {
+          return Err(EvalError::new("value graph byte limit exceeded", span));
+        }
+      }
+      Value::Array(values) => {
+        let Some(child_depth) = reserve_value_children(
+          &mut metrics,
+          pending.len(),
+          values.len(),
+          depth,
+          limits,
+          span,
+        )?
+        else {
+          continue;
+        };
+        pending
+          .try_reserve(values.len())
+          .map_err(|_| EvalError::new("value graph traversal allocation failed", span))?;
+        pending.extend(values.iter().rev().map(|value| (value, child_depth)));
+      }
+      Value::Object(values) => {
+        let Some(child_depth) = reserve_value_children(
+          &mut metrics,
+          pending.len(),
+          values.len(),
+          depth,
+          limits,
+          span,
+        )?
+        else {
+          continue;
+        };
+        for key in values.keys() {
+          metrics.bytes = checked_value_metric(metrics.bytes, key.len(), "byte", span)?;
+          if metrics.bytes > limits.max_value_bytes {
+            return Err(EvalError::new("value graph byte limit exceeded", span));
+          }
+        }
+        pending
+          .try_reserve(values.len())
+          .map_err(|_| EvalError::new("value graph traversal allocation failed", span))?;
+        pending.extend(values.iter().rev().map(|(_, value)| (value, child_depth)));
+      }
+      Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => {}
+    }
+  }
+
+  Ok(metrics)
 }
 
-impl EvalState<'_> {
-  fn eval(
-    &mut self,
-    expression: &VerifiedExpression,
-    context: &dyn RuntimeContext,
-    depth: usize,
-  ) -> Result<Value, EvalError> {
-    let span = expression.span();
-    self.step(span)?;
-    if depth > self.limits.max_depth {
-      return Err(EvalError::new("evaluation depth limit exceeded", span));
-    }
-
-    match expression.kind() {
-      VerifiedExprKindRef::Null => Ok(Value::Null),
-      VerifiedExprKindRef::Bool(value) => Ok(Value::Bool(value)),
-      VerifiedExprKindRef::Int(value) => Ok(Value::Int(value)),
-      VerifiedExprKindRef::Float(value) => Ok(Value::Float(value)),
-      VerifiedExprKindRef::String(value) => self.checked_string(value.to_string(), span),
-      VerifiedExprKindRef::Array(items) => self.eval_array(items, context, depth, span),
-      VerifiedExprKindRef::Identifier(name) => self
-        .local_value(name)
-        .or_else(|| context.get_variable(name))
-        .ok_or_else(|| EvalError::new(format!("unknown variable {name}"), span)),
-      VerifiedExprKindRef::Member { receiver, name } => {
-        let value = self.eval(receiver, context, depth + 1)?;
-        self.eval_member(value, name, span)
-      }
-      VerifiedExprKindRef::FunctionCall { name, args } => {
-        let args = self.eval_args(args, context, depth)?;
-        context
-          .registry()
-          .call_function(self.call_context(span), name, &args, span)
-      }
-      VerifiedExprKindRef::ExpressionFunctionCall {
-        name,
-        params,
-        args,
-        body,
-      } => self.eval_expression_function(
-        ExpressionFunctionFrame {
-          name,
-          params,
-          args,
-          body,
-          span,
-        },
-        context,
-        depth,
-      ),
-      VerifiedExprKindRef::MethodCall {
-        receiver,
-        name,
-        args,
-      } => {
-        let receiver = self.eval(receiver, context, depth + 1)?;
-        let args = self.eval_args(args, context, depth)?;
-        context
-          .registry()
-          .call_method(self.call_context(span), &receiver, name, &args, span)
-      }
-      VerifiedExprKindRef::Unary { op, expr } => {
-        let value = self.eval(expr, context, depth + 1)?;
-        self.eval_unary(op, value, context.registry(), span)
-      }
-      VerifiedExprKindRef::Binary { left, op, right } => {
-        self.eval_binary(left, op, right, context, depth, span)
-      }
-    }
+fn reserve_value_children(
+  metrics: &mut ValueMetrics,
+  pending: usize,
+  children: usize,
+  depth: usize,
+  limits: RuntimeResourceLimits,
+  span: SourceSpan,
+) -> Result<Option<usize>, EvalError> {
+  metrics.items = checked_value_metric(metrics.items, children, "item", span)?;
+  if metrics.items > limits.max_value_items {
+    return Err(EvalError::new("value graph item limit exceeded", span));
   }
-
-  fn step(&mut self, span: SourceSpan) -> Result<(), EvalError> {
-    self.steps = self
-      .steps
-      .checked_add(1)
-      .ok_or_else(|| EvalError::new("evaluation step counter overflowed", span))?;
-    if self.steps > self.limits.max_steps {
-      Err(EvalError::new("evaluation step limit exceeded", span))
-    } else {
-      Ok(())
-    }
+  if children == 0 {
+    return Ok(None);
   }
-
-  fn eval_array(
-    &mut self,
-    items: &[VerifiedExpression],
-    context: &dyn RuntimeContext,
-    depth: usize,
-    span: SourceSpan,
-  ) -> Result<Value, EvalError> {
-    if items.len() > self.limits.max_array_items {
-      return Err(EvalError::new("array item limit exceeded", span));
-    }
-    items
-      .iter()
-      .map(|item| self.eval(item, context, depth + 1))
-      .collect::<Result<Vec<_>, _>>()
-      .map(Value::Array)
+  let child_depth = depth
+    .checked_add(1)
+    .ok_or_else(|| EvalError::new("value graph depth counter overflowed", span))?;
+  if child_depth > limits.max_value_depth.min(MAX_VALUE_DEPTH) {
+    return Err(EvalError::new("value graph depth limit exceeded", span));
   }
-
-  fn eval_args(
-    &mut self,
-    args: &[VerifiedExpression],
-    context: &dyn RuntimeContext,
-    depth: usize,
-  ) -> Result<Vec<Value>, EvalError> {
-    args
-      .iter()
-      .map(|arg| self.eval(arg, context, depth + 1))
-      .collect()
+  let scheduled = metrics
+    .nodes
+    .checked_add(pending)
+    .and_then(|total| total.checked_add(children))
+    .ok_or_else(|| EvalError::new("value graph node counter overflowed", span))?;
+  if scheduled > limits.max_value_nodes {
+    return Err(EvalError::new("value graph node limit exceeded", span));
   }
-
-  fn eval_expression_function(
-    &mut self,
-    frame: ExpressionFunctionFrame<'_>,
-    context: &dyn RuntimeContext,
-    depth: usize,
-  ) -> Result<Value, EvalError> {
-    if frame.params.len() != frame.args.len() {
-      return Err(EvalError::new(
-        format!(
-          "verified expression function {} expected {} arguments but got {}",
-          frame.name,
-          frame.params.len(),
-          frame.args.len()
-        ),
-        frame.span,
-      ));
-    }
-
-    let values = self.eval_args(frame.args, context, depth)?;
-    let locals = frame
-      .params
-      .iter()
-      .cloned()
-      .zip(values)
-      .collect::<BTreeMap<_, _>>();
-    self.locals.push(locals);
-    let result = self.eval(frame.body, context, depth + 1);
-    self.locals.pop();
-    result
+  let minimum_bytes = metrics
+    .bytes
+    .checked_add(pending)
+    .and_then(|total| total.checked_add(children))
+    .ok_or_else(|| EvalError::new("value graph byte counter overflowed", span))?;
+  if minimum_bytes > limits.max_value_bytes {
+    return Err(EvalError::new("value graph byte limit exceeded", span));
   }
+  Ok(Some(child_depth))
+}
 
-  fn local_value(&self, name: &str) -> Option<Value> {
-    self
-      .locals
-      .iter()
-      .rev()
-      .find_map(|locals| locals.get(name).cloned())
-  }
-
-  fn eval_member(&self, value: Value, name: &str, span: SourceSpan) -> Result<Value, EvalError> {
-    match value {
-      Value::Object(values) => values
-        .get(name)
-        .cloned()
-        .ok_or_else(|| EvalError::new(format!("missing object member {name}"), span)),
-      other => Err(EvalError::new(
-        format!("cannot read member {name} from {}", other.type_name()),
-        span,
-      )),
-    }
-  }
-
-  fn eval_unary(
-    &self,
-    op: UnaryOp,
-    value: Value,
-    registry: &DynamicRegistry,
-    span: SourceSpan,
-  ) -> Result<Value, EvalError> {
-    if let Some(entry) = registry.unary_ops.get(&op) {
-      return (entry.handler)(value).map_err(|error| EvalError { span, ..error });
-    }
-    match (op, value) {
-      (UnaryOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
-      (UnaryOp::Neg, Value::Int(value)) => value
-        .checked_neg()
-        .map(Value::Int)
-        .ok_or_else(|| EvalError::new("integer negation overflowed", span)),
-      (UnaryOp::Neg, Value::Float(value)) => Ok(Value::Float(-value)),
-      (op, value) => Err(EvalError::new(
-        format!(
-          "operator {} does not accept {}",
-          op.as_str(),
-          value.type_name()
-        ),
-        span,
-      )),
-    }
-  }
-
-  fn eval_binary(
-    &mut self,
-    left: &VerifiedExpression,
-    op: BinaryOp,
-    right: &VerifiedExpression,
-    context: &dyn RuntimeContext,
-    depth: usize,
-    span: SourceSpan,
-  ) -> Result<Value, EvalError> {
-    let left_value = self.eval(left, context, depth + 1)?;
-    match op {
-      BinaryOp::And => {
-        let left_bool = expect_bool(left_value, span)?;
-        if !left_bool {
-          return Ok(Value::Bool(false));
-        }
-        let right_bool = expect_bool(self.eval(right, context, depth + 1)?, span)?;
-        Ok(Value::Bool(right_bool))
-      }
-      BinaryOp::Or => {
-        let left_bool = expect_bool(left_value, span)?;
-        if left_bool {
-          return Ok(Value::Bool(true));
-        }
-        let right_bool = expect_bool(self.eval(right, context, depth + 1)?, span)?;
-        Ok(Value::Bool(right_bool))
-      }
-      _ => {
-        let right_value = self.eval(right, context, depth + 1)?;
-        if let Some(entry) = context.registry().binary_ops.get(&op) {
-          return (entry.handler)(left_value, right_value)
-            .map_err(|error| EvalError { span, ..error });
-        }
-        self.eval_builtin_binary(left_value, op, right_value, span)
-      }
-    }
-  }
-
-  fn eval_builtin_binary(
-    &self,
-    left: Value,
-    op: BinaryOp,
-    right: Value,
-    span: SourceSpan,
-  ) -> Result<Value, EvalError> {
-    match op {
-      BinaryOp::Eq => Ok(Value::Bool(left == right)),
-      BinaryOp::Ne => Ok(Value::Bool(left != right)),
-      BinaryOp::Add => add_values(left, right, span, self.limits.max_string_bytes),
-      BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-        numeric_arithmetic(left, op, right, span)
-      }
-      BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-        compare_values(left, op, right, span)
-      }
-      BinaryOp::And | BinaryOp::Or => Err(EvalError::new("internal boolean dispatch error", span)),
-    }
-  }
-
-  fn checked_string(&self, value: String, span: SourceSpan) -> Result<Value, EvalError> {
-    if value.len() > self.limits.max_string_bytes {
-      Err(EvalError::new("string byte limit exceeded", span))
-    } else {
-      Ok(Value::String(value))
-    }
-  }
-
-  fn call_context(&self, span: SourceSpan) -> RuntimeCallContext<'_> {
-    RuntimeCallContext::new(self.program.profile(), self.program.regex_cache(), span)
-  }
+fn checked_value_metric(
+  current: usize,
+  added: usize,
+  counter: &str,
+  span: SourceSpan,
+) -> Result<usize, EvalError> {
+  current
+    .checked_add(added)
+    .ok_or_else(|| EvalError::new(format!("value graph {counter} counter overflowed"), span))
 }

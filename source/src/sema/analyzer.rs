@@ -1,15 +1,16 @@
 mod body_need;
 mod functions;
+mod limits;
 mod phase;
 mod support;
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::parser::preflight::preflight_ast;
 use crate::parser::{
   AstExpression, BinaryOp, Diagnostic, DiagnosticReport, ExprKind, SourceSpan, UnaryOp,
 };
-use serde::{Deserialize, Serialize};
-
 use crate::sema::dialect::ExpressionDialect;
 use crate::sema::profile::{
   BodyNeedSummary, Determinism, RegexPolicy, SecurityProfile, SecurityProfileId,
@@ -79,14 +80,33 @@ impl Analyzer {
     self
   }
 
-  pub fn analyze(
-    &self,
-    expression: &AstExpression,
-    schema: &RuntimeSchema,
+  pub fn analyze<'a>(
+    &'a self,
+    expression: &'a AstExpression,
+    schema: &'a RuntimeSchema,
   ) -> Result<VerifiedProgram, DiagnosticReport> {
+    let max_depth = self.profile.max_call_depth.min(128).saturating_add(1);
+    let mut preflight_diagnostics = Vec::new();
+    if let Err(report) = preflight_ast(expression, self.profile.max_ast_nodes, max_depth) {
+      preflight_diagnostics.extend(report.diagnostics);
+    }
+    for function in schema.expression_functions() {
+      if let Err(report) =
+        preflight_ast(&function.expression, self.profile.max_ast_nodes, max_depth)
+      {
+        preflight_diagnostics.extend(report.diagnostics);
+      }
+    }
+    if !preflight_diagnostics.is_empty() {
+      return Err(DiagnosticReport::new(preflight_diagnostics));
+    }
+
     let mut state = AnalyzeState::new(self, schema);
     self.dialect.validate(expression, &mut state.diagnostics);
     state.validate_function_graph();
+    if !state.preflight_lowering(expression) {
+      return Err(DiagnosticReport::new(state.diagnostics));
+    }
     let mut analysis = state.analyze_expression(expression, 0);
     state.merge_body_access_for_exposed_origin(&mut analysis.body_need, analysis.origin);
     state.validate_program_bounds(&analysis, expression.span);
@@ -130,6 +150,12 @@ struct AnalyzeState<'a> {
   required_capability_metadata: BTreeMap<CapabilityTicket, CapabilityMeta>,
   active_functions: Vec<(ExpressionFunctionScope, String)>,
   local_bindings: Vec<BTreeMap<String, LocalBinding>>,
+  inline_bindings: Vec<(&'a [String], &'a [AstExpression])>,
+  lowered_nodes: usize,
+  lowered_scalar_bytes: usize,
+  node_limit_reported: bool,
+  depth_limit_reported: bool,
+  scalar_byte_limit_reported: bool,
 }
 
 impl<'a> AnalyzeState<'a> {
@@ -144,6 +170,12 @@ impl<'a> AnalyzeState<'a> {
       required_capability_metadata: BTreeMap::new(),
       active_functions: Vec::new(),
       local_bindings: Vec::new(),
+      inline_bindings: Vec::new(),
+      lowered_nodes: 0,
+      lowered_scalar_bytes: 0,
+      node_limit_reported: false,
+      depth_limit_reported: false,
+      scalar_byte_limit_reported: false,
     }
   }
 
@@ -176,14 +208,34 @@ impl<'a> AnalyzeState<'a> {
     }
   }
 
-  fn analyze_expression(&mut self, expression: &AstExpression, depth: usize) -> ExprAnalysis {
-    if depth > self.analyzer.profile.max_call_depth {
-      self.diagnostics.push(Diagnostic::new(
-        "semantic call depth limit exceeded",
-        expression.span,
-      ));
+  fn analyze_expression(&mut self, expression: &'a AstExpression, depth: usize) -> ExprAnalysis {
+    if depth > self.analyzer.profile.max_call_depth.min(128) {
+      self.report_depth_limit(expression.span);
+      return ExprAnalysis::leaf(
+        VerifiedExpression::new(VerifiedExprKind::Null, expression.span),
+        None,
+      );
     }
-
+    if let ExprKind::Identifier { name } = &expression.kind
+      && let Some(binding) = self.inline_binding(name)
+      && let Some(frame) = self.inline_bindings.pop()
+    {
+      let analysis = self.analyze_expression(binding, depth);
+      self.inline_bindings.push(frame);
+      return analysis;
+    }
+    if !self.charge_node(expression.span) {
+      return ExprAnalysis::leaf(
+        VerifiedExpression::new(VerifiedExprKind::Null, expression.span),
+        None,
+      );
+    }
+    if !self.charge_expression_scalar_bytes(expression) {
+      return ExprAnalysis::leaf(
+        VerifiedExpression::new(VerifiedExprKind::Null, expression.span),
+        None,
+      );
+    }
     match &expression.kind {
       ExprKind::Null => ExprAnalysis::leaf(
         VerifiedExpression::new(VerifiedExprKind::Null, expression.span),
@@ -253,14 +305,14 @@ impl<'a> AnalyzeState<'a> {
 
   fn analyze_array(
     &mut self,
-    items: &[AstExpression],
+    items: &'a [AstExpression],
     span: SourceSpan,
     depth: usize,
   ) -> ExprAnalysis {
     let mut body_need = BodyNeedSummary::default();
     let mut mitigation_payload = false;
-    let mut nodes = 1;
-    let mut cost = 1;
+    let mut nodes = 1_usize;
+    let mut cost = 1_u64;
     let items = items
       .iter()
       .map(|item| {
@@ -268,8 +320,8 @@ impl<'a> AnalyzeState<'a> {
         body_need = body_need
           .merge(self.body_need_for_consumed_analysis(analysis.body_need, analysis.origin));
         mitigation_payload |= analysis.mitigation_payload;
-        nodes += analysis.nodes;
-        cost += analysis.cost;
+        nodes = nodes.saturating_add(analysis.nodes);
+        cost = cost.saturating_add(analysis.cost);
         analysis.expr
       })
       .collect();
@@ -286,7 +338,7 @@ impl<'a> AnalyzeState<'a> {
 
   fn analyze_member(
     &mut self,
-    receiver: &AstExpression,
+    receiver: &'a AstExpression,
     name: &str,
     span: SourceSpan,
     depth: usize,
@@ -322,8 +374,8 @@ impl<'a> AnalyzeState<'a> {
       origin,
       path,
       body_need,
-      receiver.nodes + 1,
-      receiver.cost + 1,
+      receiver.nodes.saturating_add(1),
+      receiver.cost.saturating_add(1),
     )
     .with_mitigation_payload(mitigation_payload)
   }
@@ -331,7 +383,7 @@ impl<'a> AnalyzeState<'a> {
   fn analyze_function_call(
     &mut self,
     name: &str,
-    args: &[AstExpression],
+    args: &'a [AstExpression],
     span: SourceSpan,
     depth: usize,
   ) -> ExprAnalysis {
@@ -372,17 +424,19 @@ impl<'a> AnalyzeState<'a> {
       None,
       None,
       body_need,
-      args_analysis.nodes + 1,
-      args_analysis.cost + capability.map_or(1, |capability| capability.cost.static_cost()),
+      args_analysis.nodes.saturating_add(1),
+      args_analysis
+        .cost
+        .saturating_add(capability.map_or(1, |capability| capability.cost.static_cost())),
     )
     .with_mitigation_payload(args_analysis.mitigation_payload)
   }
 
   fn analyze_method_call(
     &mut self,
-    receiver: &AstExpression,
+    receiver: &'a AstExpression,
     name: &str,
-    args: &[AstExpression],
+    args: &'a [AstExpression],
     span: SourceSpan,
     depth: usize,
   ) -> ExprAnalysis {
@@ -423,10 +477,18 @@ impl<'a> AnalyzeState<'a> {
       None,
       None,
       body_need,
-      receiver.nodes + args_analysis.nodes + 1,
-      receiver.cost
-        + args_analysis.cost
-        + capability.map_or(1, |capability| capability.cost.static_cost()),
+      receiver
+        .nodes
+        .checked_add(args_analysis.nodes)
+        .and_then(|nodes| nodes.checked_add(1))
+        .unwrap_or(usize::MAX),
+      receiver
+        .cost
+        .checked_add(args_analysis.cost)
+        .and_then(|cost| {
+          cost.checked_add(capability.map_or(1, |capability| capability.cost.static_cost()))
+        })
+        .unwrap_or(u64::MAX),
     )
     .with_mitigation_payload(mitigation_payload)
   }
@@ -434,7 +496,7 @@ impl<'a> AnalyzeState<'a> {
   fn analyze_unary(
     &mut self,
     op: UnaryOp,
-    expr: &AstExpression,
+    expr: &'a AstExpression,
     span: SourceSpan,
     depth: usize,
   ) -> ExprAnalysis {
@@ -460,17 +522,17 @@ impl<'a> AnalyzeState<'a> {
       None,
       None,
       body_need,
-      expr.nodes + 1,
-      expr.cost + capability.cost.static_cost(),
+      expr.nodes.saturating_add(1),
+      expr.cost.saturating_add(capability.cost.static_cost()),
     )
     .with_mitigation_payload(expr.mitigation_payload)
   }
 
   fn analyze_binary(
     &mut self,
-    left: &AstExpression,
+    left: &'a AstExpression,
     op: BinaryOp,
-    right: &AstExpression,
+    right: &'a AstExpression,
     span: SourceSpan,
     depth: usize,
   ) -> ExprAnalysis {
@@ -499,18 +561,26 @@ impl<'a> AnalyzeState<'a> {
       None,
       None,
       left_body_need.merge(right_body_need),
-      left.nodes + right.nodes + 1,
-      left.cost + right.cost + capability.cost.static_cost(),
+      left
+        .nodes
+        .checked_add(right.nodes)
+        .and_then(|nodes| nodes.checked_add(1))
+        .unwrap_or(usize::MAX),
+      left
+        .cost
+        .checked_add(right.cost)
+        .and_then(|cost| cost.checked_add(capability.cost.static_cost()))
+        .unwrap_or(u64::MAX),
     )
     .with_mitigation_payload(left.mitigation_payload || right.mitigation_payload)
   }
 
-  fn analyze_args(&mut self, args: &[AstExpression], depth: usize) -> ArgsAnalysis {
+  fn analyze_args(&mut self, args: &'a [AstExpression], depth: usize) -> ArgsAnalysis {
     let mut body_need = BodyNeedSummary::default();
     let mut consumed_body_need = BodyNeedSummary::default();
     let mut mitigation_payload = false;
-    let mut nodes = 0;
-    let mut cost = 0;
+    let mut nodes = 0_usize;
+    let mut cost = 0_u64;
     let exprs = args
       .iter()
       .map(|arg| {
@@ -520,8 +590,8 @@ impl<'a> AnalyzeState<'a> {
         consumed_body_need = consumed_body_need
           .merge(self.body_need_for_consumed_analysis(analysis.body_need, analysis.origin));
         mitigation_payload |= analysis.mitigation_payload;
-        nodes += analysis.nodes;
-        cost += analysis.cost;
+        nodes = nodes.saturating_add(analysis.nodes);
+        cost = cost.saturating_add(analysis.cost);
         (analysis.expr, binding)
       })
       .collect::<Vec<_>>();
@@ -582,13 +652,14 @@ impl<'a> AnalyzeState<'a> {
   fn validate_regex_args(
     &mut self,
     capability: &CapabilityMeta,
-    args: &[AstExpression],
+    args: &'a [AstExpression],
     span: SourceSpan,
   ) {
     for regex_arg in &capability.regex_args {
       let Some(arg) = args.get(regex_arg.index) else {
         continue;
       };
+      let arg = self.resolve_inline_argument(arg);
       match self.analyzer.profile.default_regex_policy {
         RegexPolicy::Forbid => self.diagnostics.push(Diagnostic::new(
           "regex arguments are forbidden by profile",

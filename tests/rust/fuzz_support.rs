@@ -4,11 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arbitrary::{Arbitrary, Unstructured};
 use online_dsl_forge::{
-  Analyzer, AstExpression, CompileOptions, Diagnostic, DiagnosticReport, EvalError, EvalLimits,
-  ExprKind, ExpressionDialect, MapRuntime, MemoryFileResolver, Phase, RulepackRenderOptions,
-  RuntimeSchema, SecurityProfile, SourceSpan, Value, compile_expression, evaluate,
-  format_expression, inspect_rulepack, inspect_rulepack_inputs, parse_expression,
-  referenced_rulepack_files, render_rulepack_bundle, render_rulepack_for_install,
+  Analyzer, AstExpression, AstFormatLimits, CompileOptions, Diagnostic, DiagnosticReport,
+  EvalError, EvalLimits, ExprKind, ExpressionDialect, MapRuntime, MemoryFileResolver, ParseLimits,
+  Phase, RulepackRenderLimits, RulepackRenderOptions, RuntimeResourceLimits, RuntimeSchema,
+  SecurityProfile, SourceSpan, Value, compile_expression, evaluate_with_resource_limits,
+  format_expression, format_expression_with_limits, inspect_rulepack_inputs_with_limits,
+  inspect_rulepack_with_limits, parse_expression, parse_expression_with_limits,
+  referenced_rulepack_files_with_limits, render_rulepack_bundle_with_limits,
+  render_rulepack_for_install_with_limits, render_text_with_limits,
 };
 use serde::Serialize;
 
@@ -26,6 +29,7 @@ pub fn exercise_target(target: &str, data: &[u8]) {
 
 pub fn exercise_dsl_expression(data: &[u8]) {
   let source = String::from_utf8_lossy(data);
+  let selected_limits = parse_limits(data);
 
   match online_dsl_forge::lexer::tokenize(&source) {
     Ok(tokens) => {
@@ -48,6 +52,40 @@ pub fn exercise_dsl_expression(data: &[u8]) {
       }
     }
     Err(diagnostics) => validate_diagnostics(&diagnostics, &source),
+  }
+
+  match online_dsl_forge::lexer::tokenize_with_limits(&source, selected_limits) {
+    Ok(tokens) => {
+      assert!(
+        matches!(
+          tokens.last().map(|token| &token.kind),
+          Some(online_dsl_forge::lexer::TokenKind::Eof)
+        ),
+        "bounded successful lexing must end with EOF"
+      );
+      for token in tokens {
+        validate_span(token.span, &source);
+      }
+    }
+    Err(diagnostics) => validate_diagnostics(&diagnostics, &source),
+  }
+
+  match parse_expression_with_limits(&source, selected_limits) {
+    Ok(ast) => {
+      validate_ast_spans(&ast, &source);
+      match format_expression_with_limits(&ast, format_limits(data)) {
+        Ok(canonical) => {
+          let reparsed = parse_expression(&canonical).expect("bounded canonical output must parse");
+          assert_eq!(
+            format_expression(&reparsed),
+            canonical,
+            "bounded canonical formatting must be idempotent"
+          );
+        }
+        Err(report) => validate_diagnostics(&report.diagnostics, &source),
+      }
+    }
+    Err(report) => validate_diagnostics(&report.diagnostics, &source),
   }
 
   match parse_expression(&source) {
@@ -78,6 +116,12 @@ pub fn exercise_expression_pipeline(data: &[u8]) {
   let bindings = bindings_bytes
     .and_then(|raw| serde_json::from_slice::<serde_json::Value>(raw).ok())
     .unwrap_or_else(|| serde_json::json!({}));
+  let resource_limits = runtime_resource_limits(&selectors[2..7]);
+
+  if let Err(error) = MapRuntime::from_json_bindings_with_limits(bindings.clone(), resource_limits)
+  {
+    validate_span(error.span, &source);
+  }
 
   let ast = match parse_expression(&source) {
     Ok(ast) => ast,
@@ -106,6 +150,7 @@ pub fn exercise_expression_pipeline(data: &[u8]) {
     second,
     &runtime,
     eval_limits(&selectors[2..7]),
+    resource_limits,
     &source,
   );
 
@@ -134,13 +179,14 @@ pub fn exercise_rulepack_render(data: &[u8]) {
     .and_then(|raw| serde_json::from_slice::<RulepackStructuredInput>(raw).ok())
     .unwrap_or_default();
 
+  let variables = structured
+    .variables
+    .into_iter()
+    .take(16)
+    .map(|(name, value)| (bounded_string(name, 128), bounded_string(value, 4096)))
+    .collect::<BTreeMap<_, _>>();
   let options = RulepackRenderOptions {
-    variables: structured
-      .variables
-      .into_iter()
-      .take(16)
-      .map(|(name, value)| (bounded_string(name, 128), bounded_string(value, 4096)))
-      .collect(),
+    variables: variables.clone(),
     source_commit: structured
       .source_commit
       .map(|value| bounded_string(value, 128)),
@@ -156,26 +202,31 @@ pub fn exercise_rulepack_render(data: &[u8]) {
   } else {
     "fuzz rulepack unicode ☃"
   };
+  let limits = rulepack_limits(&selectors);
 
   assert_deterministic(
-    inspect_rulepack_inputs(&manifest, source),
-    inspect_rulepack_inputs(&manifest, source),
+    inspect_rulepack_inputs_with_limits(&manifest, source, limits),
+    inspect_rulepack_inputs_with_limits(&manifest, source, limits),
   );
   assert_deterministic(
-    inspect_rulepack(&manifest, source, options.clone()),
-    inspect_rulepack(&manifest, source, options.clone()),
+    inspect_rulepack_with_limits(&manifest, source, options.clone(), limits),
+    inspect_rulepack_with_limits(&manifest, source, options.clone(), limits),
   );
   assert_deterministic(
-    referenced_rulepack_files(&manifest, source, options.clone()),
-    referenced_rulepack_files(&manifest, source, options.clone()),
+    referenced_rulepack_files_with_limits(&manifest, source, options.clone(), limits),
+    referenced_rulepack_files_with_limits(&manifest, source, options.clone(), limits),
   );
   assert_deterministic(
-    render_rulepack_for_install(&manifest, source, options.clone()),
-    render_rulepack_for_install(&manifest, source, options.clone()),
+    render_rulepack_for_install_with_limits(&manifest, source, options.clone(), limits),
+    render_rulepack_for_install_with_limits(&manifest, source, options.clone(), limits),
   );
   assert_deterministic(
-    render_rulepack_bundle(&manifest, source, options.clone(), &resolver),
-    render_rulepack_bundle(&manifest, source, options, &resolver),
+    render_rulepack_bundle_with_limits(&manifest, source, options.clone(), &resolver, limits),
+    render_rulepack_bundle_with_limits(&manifest, source, options, &resolver, limits),
+  );
+  assert_deterministic(
+    render_text_with_limits(&manifest, &variables, limits),
+    render_text_with_limits(&manifest, &variables, limits),
   );
 }
 
@@ -233,6 +284,53 @@ fn eval_limits(selectors: &[u8]) -> EvalLimits {
     max_depth: 1 + usize::from(selectors[1] % 64),
     max_string_bytes: 1 + usize::from(selectors[2]) * 64,
     max_array_items: 1 + usize::from(selectors[3]),
+  }
+}
+
+fn parse_limits(data: &[u8]) -> ParseLimits {
+  let select = |index: usize| usize::from(data.get(index).copied().unwrap_or_default());
+  ParseLimits {
+    max_source_bytes: select(0) * 32,
+    max_decoded_scalar_bytes: select(1) * 32,
+    max_tokens: select(2) * 8,
+    max_diagnostics: select(3) * 4,
+    max_ast_nodes: select(4) * 8,
+    max_collection_items: select(5) * 4,
+  }
+}
+
+fn format_limits(data: &[u8]) -> AstFormatLimits {
+  let select = |index: usize| usize::from(data.get(index).copied().unwrap_or_default());
+  AstFormatLimits {
+    max_depth: select(6) % 128,
+    max_nodes: select(7) * 8,
+    max_output_bytes: select(8) * 32,
+  }
+}
+
+fn runtime_resource_limits(selectors: &[u8]) -> RuntimeResourceLimits {
+  RuntimeResourceLimits {
+    max_value_depth: 1 + usize::from(selectors[0] % 32),
+    max_value_nodes: 1 + usize::from(selectors[1]) * 16,
+    max_value_items: usize::from(selectors[2]) * 16,
+    max_value_bytes: 1 + usize::from(selectors[3]) * 64,
+    max_total_value_bytes: 1 + usize::from(selectors[4]) * 256,
+  }
+}
+
+fn rulepack_limits(selectors: &[u8]) -> RulepackRenderLimits {
+  let input = 1 + usize::from(selectors[0]) * 256;
+  let output = 1 + usize::from(selectors[1]) * 512;
+  RulepackRenderLimits {
+    max_manifest_bytes: input,
+    max_referenced_file_bytes: input,
+    max_variable_value_bytes: 1 + usize::from(selectors[0]) * 32,
+    max_total_variable_bytes: input,
+    max_variables: 1 + usize::from(selectors[1] % 32),
+    max_rulepack_files: 1 + usize::from(selectors[0] % 32),
+    max_placeholders: usize::from(selectors[1]) * 16,
+    max_total_input_bytes: input * 2,
+    max_total_output_bytes: output,
   }
 }
 
@@ -364,6 +462,7 @@ fn compare_compile_results(
   second: Result<online_dsl_forge::CompiledExpression, DiagnosticReport>,
   runtime: &MapRuntime,
   limits: EvalLimits,
+  resource_limits: RuntimeResourceLimits,
   source: &str,
 ) {
   match (first, second) {
@@ -373,8 +472,8 @@ fn compare_compile_results(
       assert_eq!(left, right, "compile diagnostics must be deterministic");
     }
     (Ok(left), Ok(right)) => {
-      let first_result = evaluate(&left, runtime, limits);
-      let second_result = evaluate(&right, runtime, limits);
+      let first_result = evaluate_with_resource_limits(&left, runtime, limits, resource_limits);
+      let second_result = evaluate_with_resource_limits(&right, runtime, limits, resource_limits);
       assert_eq!(
         evaluation_fingerprint(&first_result),
         evaluation_fingerprint(&second_result),
@@ -394,7 +493,8 @@ fn compare_compile_results(
         },
       );
       if let Ok(canonical_compiled) = canonical_compiled {
-        let canonical_result = evaluate(&canonical_compiled, runtime, limits);
+        let canonical_result =
+          evaluate_with_resource_limits(&canonical_compiled, runtime, limits, resource_limits);
         assert_eq!(
           evaluation_fingerprint(&first_result),
           evaluation_fingerprint(&canonical_result),

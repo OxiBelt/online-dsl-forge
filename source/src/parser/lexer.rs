@@ -1,5 +1,11 @@
 use super::diagnostics::Diagnostic;
+use super::limits::ParseLimits;
 use super::span::SourceSpan;
+
+const SOURCE_LIMIT_EXCEEDED: &str = "source byte limit exceeded";
+const SCALAR_LIMIT_EXCEEDED: &str = "decoded scalar byte limit exceeded";
+const TOKEN_LIMIT_EXCEEDED: &str = "token limit exceeded";
+const DIAGNOSTIC_LIMIT_EXCEEDED: &str = "diagnostic limit exceeded";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
@@ -49,9 +55,25 @@ pub enum TokenKind {
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>, Vec<Diagnostic>> {
+  tokenize_with_limits(input, ParseLimits::default())
+}
+
+pub fn tokenize_with_limits(
+  input: &str,
+  limits: ParseLimits,
+) -> Result<Vec<Token>, Vec<Diagnostic>> {
+  if input.len() > limits.max_source_bytes {
+    return Err(vec![Diagnostic::new(
+      SOURCE_LIMIT_EXCEEDED,
+      SourceSpan::new(0, input.len()),
+    )]);
+  }
   let mut lexer = Lexer {
     input,
     position: 0,
+    decoded_scalar_bytes: 0,
+    stopped: false,
+    limits,
     diagnostics: Vec::new(),
     tokens: Vec::new(),
   };
@@ -66,13 +88,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, Vec<Diagnostic>> {
 struct Lexer<'a> {
   input: &'a str,
   position: usize,
+  decoded_scalar_bytes: usize,
+  stopped: bool,
+  limits: ParseLimits,
   diagnostics: Vec<Diagnostic>,
   tokens: Vec<Token>,
 }
 
 impl Lexer<'_> {
   fn run(&mut self) {
-    while let Some(ch) = self.peek_char() {
+    while !self.stopped
+      && let Some(ch) = self.peek_char()
+    {
       match ch {
         ch if ch.is_whitespace() => {
           self.advance_char();
@@ -107,22 +134,23 @@ impl Lexer<'_> {
         other => self.invalid_char(other),
       }
     }
-    self
-      .tokens
-      .push(Token::new(TokenKind::Eof, self.position, self.position));
+    if !self.stopped {
+      self.push_token(TokenKind::Eof, self.position, self.position);
+    }
   }
 
   fn lex_string(&mut self, quote: char) {
     let start = self.position;
+    if !self.has_token_capacity(SourceSpan::new(start, start + quote.len_utf8())) {
+      return;
+    }
     self.advance_char();
     let mut value = String::new();
 
     while let Some(ch) = self.peek_char() {
       if ch == quote {
         self.advance_char();
-        self
-          .tokens
-          .push(Token::new(TokenKind::String(value), start, self.position));
+        self.push_token(TokenKind::String(value), start, self.position);
         return;
       }
 
@@ -133,21 +161,24 @@ impl Lexer<'_> {
         };
         self.advance_char();
         match escaped {
-          '\\' => value.push('\\'),
-          '"' => value.push('"'),
-          '\'' => value.push('\''),
-          'n' => value.push('\n'),
-          'r' => value.push('\r'),
-          't' => value.push('\t'),
-          other => value.push(other),
+          '\\' => self.push_scalar(&mut value, '\\', start),
+          '"' => self.push_scalar(&mut value, '"', start),
+          '\'' => self.push_scalar(&mut value, '\'', start),
+          'n' => self.push_scalar(&mut value, '\n', start),
+          'r' => self.push_scalar(&mut value, '\r', start),
+          't' => self.push_scalar(&mut value, '\t', start),
+          other => self.push_scalar(&mut value, other, start),
         }
       } else {
-        value.push(ch);
+        self.push_scalar(&mut value, ch, start);
         self.advance_char();
+      }
+      if self.stopped {
+        return;
       }
     }
 
-    self.diagnostics.push(Diagnostic::new(
+    self.push_diagnostic(Diagnostic::new(
       "unterminated string literal",
       SourceSpan::new(start, self.position),
     ));
@@ -172,21 +203,17 @@ impl Lexer<'_> {
     if is_float {
       match raw.parse::<f64>() {
         Ok(value) if value.is_finite() => {
-          self
-            .tokens
-            .push(Token::new(TokenKind::Float(value), start, self.position))
+          self.push_token(TokenKind::Float(value), start, self.position)
         }
-        Ok(_) | Err(_) => self.diagnostics.push(Diagnostic::new(
+        Ok(_) | Err(_) => self.push_diagnostic(Diagnostic::new(
           "invalid float literal",
           SourceSpan::new(start, self.position),
         )),
       }
     } else {
       match raw.parse::<i64>() {
-        Ok(value) => self
-          .tokens
-          .push(Token::new(TokenKind::Int(value), start, self.position)),
-        Err(_) => self.diagnostics.push(Diagnostic::new(
+        Ok(value) => self.push_token(TokenKind::Int(value), start, self.position),
+        Err(_) => self.push_diagnostic(Diagnostic::new(
           "invalid integer literal",
           SourceSpan::new(start, self.position),
         )),
@@ -206,13 +233,19 @@ impl Lexer<'_> {
     }
 
     let raw = &self.input[start..self.position];
+    if !self.charge_scalar_bytes(raw.len(), SourceSpan::new(start, self.position)) {
+      return;
+    }
+    if !self.has_token_capacity(SourceSpan::new(start, self.position)) {
+      return;
+    }
     let kind = match raw {
       "true" => TokenKind::True,
       "false" => TokenKind::False,
       "null" => TokenKind::Null,
       _ => TokenKind::Identifier(raw.to_string()),
     };
-    self.tokens.push(Token::new(kind, start, self.position));
+    self.push_token(kind, start, self.position);
   }
 
   fn skip_line_comment(&mut self) {
@@ -227,20 +260,20 @@ impl Lexer<'_> {
   fn push_simple(&mut self, kind: TokenKind) {
     let start = self.position;
     self.advance_char();
-    self.tokens.push(Token::new(kind, start, self.position));
+    self.push_token(kind, start, self.position);
   }
 
   fn push_two(&mut self, kind: TokenKind) {
     let start = self.position;
     self.advance_char();
     self.advance_char();
-    self.tokens.push(Token::new(kind, start, self.position));
+    self.push_token(kind, start, self.position);
   }
 
   fn invalid_char(&mut self, ch: char) {
     let start = self.position;
     self.advance_char();
-    self.diagnostics.push(Diagnostic::new(
+    self.push_diagnostic(Diagnostic::new(
       format!("invalid character {ch:?}"),
       SourceSpan::new(start, self.position),
     ));
@@ -260,5 +293,55 @@ impl Lexer<'_> {
     let ch = self.peek_char()?;
     self.position += ch.len_utf8();
     Some(ch)
+  }
+
+  fn push_token(&mut self, kind: TokenKind, start: usize, end: usize) {
+    if !self.has_token_capacity(SourceSpan::new(start, end)) {
+      return;
+    }
+    self.tokens.push(Token::new(kind, start, end));
+  }
+
+  fn has_token_capacity(&mut self, span: SourceSpan) -> bool {
+    if self.tokens.len() >= self.limits.max_tokens {
+      self.fail_limit(TOKEN_LIMIT_EXCEEDED, span);
+      false
+    } else {
+      true
+    }
+  }
+
+  fn push_diagnostic(&mut self, diagnostic: Diagnostic) {
+    if self.diagnostics.len() >= self.limits.max_diagnostics {
+      self.fail_limit(DIAGNOSTIC_LIMIT_EXCEEDED, diagnostic.span);
+      return;
+    }
+    self.diagnostics.push(diagnostic);
+  }
+
+  fn push_scalar(&mut self, value: &mut String, ch: char, start: usize) {
+    let span = SourceSpan::new(start, self.position);
+    if self.charge_scalar_bytes(ch.len_utf8(), span) {
+      value.push(ch);
+    }
+  }
+
+  fn charge_scalar_bytes(&mut self, bytes: usize, span: SourceSpan) -> bool {
+    let Some(total) = self.decoded_scalar_bytes.checked_add(bytes) else {
+      self.fail_limit(SCALAR_LIMIT_EXCEEDED, span);
+      return false;
+    };
+    if total > self.limits.max_decoded_scalar_bytes {
+      self.fail_limit(SCALAR_LIMIT_EXCEEDED, span);
+      return false;
+    }
+    self.decoded_scalar_bytes = total;
+    true
+  }
+
+  fn fail_limit(&mut self, message: &'static str, span: SourceSpan) {
+    self.diagnostics.clear();
+    self.diagnostics.push(Diagnostic::new(message, span));
+    self.stopped = true;
   }
 }

@@ -5,6 +5,7 @@ pub mod parser;
 pub mod rulepack_render;
 pub mod runtime;
 pub mod sema;
+mod serde_support;
 pub mod value;
 
 pub use compile::{
@@ -16,8 +17,9 @@ pub use compile::{
   VerifiedExprKindRef, VerifiedExpression, VerifiedProgram, compile_expression,
 };
 pub use parser::{
-  AstExpression, BinaryOp, Diagnostic, DiagnosticReport, ExprKind, SourceSpan, UnaryOp, ast,
-  diagnostics, format, format_expression, lexer, parse_expression, span,
+  AstExpression, AstFormatLimits, BinaryOp, Diagnostic, DiagnosticReport, ExprKind, ParseLimits,
+  SourceSpan, UnaryOp, ast, diagnostics, format, format_expression, format_expression_with_limits,
+  lexer, parse_expression, parse_expression_with_limits, span,
 };
 pub use rulepack_render::{
   BlobFileResolver, BlobStore, FileResolver, MemoryFileResolver, RenderedRulepackBundle,
@@ -25,15 +27,18 @@ pub use rulepack_render::{
   RulepackDiscovery, RulepackException, RulepackGroupFileSummary, RulepackInputMetadata,
   RulepackInspection, RulepackMode, RulepackModeOverride, RulepackOverride,
   RulepackOverrideSelector, RulepackPhase, RulepackProfile, RulepackReferencedFile,
-  RulepackReferencedFileKind, RulepackRenderError, RulepackRenderOptions, RulepackRuleSummary,
-  RulepackSourceProvenance, RulepackSummary, RulepackVariable, inspect_rulepack,
-  inspect_rulepack_inputs, referenced_rulepack_files, render_rulepack_bundle,
-  render_rulepack_for_install, render_text,
+  RulepackReferencedFileKind, RulepackRenderError, RulepackRenderLimits, RulepackRenderOptions,
+  RulepackRuleSummary, RulepackSourceProvenance, RulepackSummary, RulepackVariable,
+  inspect_rulepack, inspect_rulepack_inputs, inspect_rulepack_inputs_with_limits,
+  inspect_rulepack_with_limits, referenced_rulepack_files, referenced_rulepack_files_with_limits,
+  render_rulepack_bundle, render_rulepack_bundle_with_limits, render_rulepack_for_install,
+  render_rulepack_for_install_with_limits, render_text, render_text_with_limits,
 };
 pub use runtime::{
   DynamicRegistry, EvalError, EvalLimits, MapRuntime, RuntimeCallContext, RuntimeContext,
   RuntimePatternSetConfig, RuntimePatternSetError, RuntimePatternSetKind, RuntimePatternSetLimits,
-  RuntimePatternSets, default_registry, evaluate, evaluate_verified, oxirule_pattern_set_registry,
-  register_oxirule_pattern_set_methods,
+  RuntimePatternSets, RuntimeResourceLimits, default_registry, evaluate, evaluate_verified,
+  evaluate_verified_with_resource_limits, evaluate_with_resource_limits,
+  oxirule_pattern_set_registry, register_oxirule_pattern_set_methods,
 };
 pub use value::Value;

@@ -1,4 +1,5 @@
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn cli() -> Command {
   Command::new(env!("CARGO_BIN_EXE_online-dsl-forgectl"))
@@ -58,6 +59,41 @@ fn cli_rejects_excessive_parse_depth_without_aborting() {
 
   assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
   assert!(stderr(&output).contains("parse recursion depth limit exceeded"));
+}
+
+#[test]
+fn cli_rejects_oversized_stdin_before_parsing() {
+  let mut child = cli()
+    .arg("check")
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("CLI should start");
+  child
+    .stdin
+    .take()
+    .expect("stdin should be piped")
+    .write_all(&vec![b'a'; 1024 * 1024 + 1])
+    .expect("oversized expression should be written");
+  let output = child.wait_with_output().expect("CLI should finish");
+
+  assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+  assert!(stderr(&output).contains("expression exceeds input byte limit of 1048576"));
+}
+
+#[test]
+fn cli_rejects_unsigned_json_integers_outside_i64() {
+  for integer in ["18446744073709551615", "18446744073709551616"] {
+    let bindings = format!(r#"{{"identifier":{integer}}}"#);
+    let output = cli()
+      .args(["eval", "true", "--bindings", bindings.as_str()])
+      .output()
+      .expect("CLI should run");
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert!(stderr(&output).contains("outside the supported i64 range"));
+  }
 }
 
 fn stderr(output: &std::process::Output) -> String {

@@ -1,6 +1,7 @@
 use super::ast::{AstExpression, BinaryOp, ExprKind, UnaryOp};
 use super::diagnostics::{Diagnostic, DiagnosticReport};
-use super::lexer::{Token, TokenKind, tokenize};
+use super::lexer::{Token, TokenKind, tokenize_with_limits};
+use super::limits::ParseLimits;
 use super::span::SourceSpan;
 
 const MAX_PARSE_RECURSION_DEPTH: usize = 256;
@@ -10,10 +11,30 @@ const MAX_PARSE_RECURSION_DEPTH: usize = 256;
 const MAX_AST_SERIALIZED_DEPTH: usize = 127;
 const PARSE_RECURSION_DEPTH_EXCEEDED: &str = "parse recursion depth limit exceeded";
 const AST_DEPTH_EXCEEDED: &str = "AST depth limit exceeded";
+const AST_NODE_LIMIT_EXCEEDED: &str = "AST node limit exceeded";
+const COLLECTION_LIMIT_EXCEEDED: &str = "collection item limit exceeded";
 
 pub fn parse_expression(input: &str) -> Result<AstExpression, DiagnosticReport> {
-  let tokens = tokenize(input).map_err(DiagnosticReport::new)?;
-  Parser::new(tokens).parse()
+  parse_expression_with_limits(input, ParseLimits::default())
+}
+
+pub fn parse_expression_with_limits(
+  input: &str,
+  limits: ParseLimits,
+) -> Result<AstExpression, DiagnosticReport> {
+  let tokens = tokenize_with_limits(input, limits).map_err(DiagnosticReport::new)?;
+  Parser::new(tokens, limits).parse().map_err(|report| {
+    if report.diagnostics.len() > limits.max_diagnostics {
+      let span = report
+        .diagnostics
+        .first()
+        .map(|diagnostic| diagnostic.span)
+        .unwrap_or_default();
+      DiagnosticReport::single("diagnostic limit exceeded", span)
+    } else {
+      report
+    }
+  })
 }
 
 struct ParsedExpression {
@@ -22,28 +43,6 @@ struct ParsedExpression {
 }
 
 impl ParsedExpression {
-  fn leaf(kind: ExprKind, span: SourceSpan) -> Self {
-    Self {
-      ast: AstExpression::new(kind, span),
-      serialized_depth: 2,
-    }
-  }
-
-  fn checked(
-    kind: ExprKind,
-    span: SourceSpan,
-    serialized_depth: usize,
-  ) -> Result<Self, DiagnosticReport> {
-    if serialized_depth > MAX_AST_SERIALIZED_DEPTH {
-      Err(DiagnosticReport::single(AST_DEPTH_EXCEEDED, span))
-    } else {
-      Ok(Self {
-        ast: AstExpression::new(kind, span),
-        serialized_depth,
-      })
-    }
-  }
-
   fn span(&self) -> SourceSpan {
     self.ast.span
   }
@@ -66,14 +65,18 @@ struct Parser {
   tokens: Vec<Token>,
   position: usize,
   recursion_depth: usize,
+  ast_nodes: usize,
+  limits: ParseLimits,
 }
 
 impl Parser {
-  fn new(tokens: Vec<Token>) -> Self {
+  fn new(tokens: Vec<Token>, limits: ParseLimits) -> Self {
     Self {
       tokens,
       position: 0,
       recursion_depth: 0,
+      ast_nodes: 0,
+      limits,
     }
   }
 
@@ -92,7 +95,7 @@ impl Parser {
       .is_some()
     {
       let right = self.parse_and()?;
-      expression = binary(expression, BinaryOp::Or, right)?;
+      expression = self.binary(expression, BinaryOp::Or, right)?;
     }
     Ok(expression)
   }
@@ -104,7 +107,7 @@ impl Parser {
       .is_some()
     {
       let right = self.parse_equality()?;
-      expression = binary(expression, BinaryOp::And, right)?;
+      expression = self.binary(expression, BinaryOp::And, right)?;
     }
     Ok(expression)
   }
@@ -129,7 +132,7 @@ impl Parser {
         break;
       };
       let right = self.parse_comparison()?;
-      expression = binary(expression, op, right)?;
+      expression = self.binary(expression, op, right)?;
     }
     Ok(expression)
   }
@@ -164,7 +167,7 @@ impl Parser {
         break;
       };
       let right = self.parse_additive()?;
-      expression = binary(expression, op, right)?;
+      expression = self.binary(expression, op, right)?;
     }
     Ok(expression)
   }
@@ -189,7 +192,7 @@ impl Parser {
         break;
       };
       let right = self.parse_multiplicative()?;
-      expression = binary(expression, op, right)?;
+      expression = self.binary(expression, op, right)?;
     }
     Ok(expression)
   }
@@ -219,7 +222,7 @@ impl Parser {
         break;
       };
       let right = self.parse_unary()?;
-      expression = binary(expression, op, right)?;
+      expression = self.binary(expression, op, right)?;
     }
     Ok(expression)
   }
@@ -228,9 +231,9 @@ impl Parser {
     if let Some(token) = self.consume_kind(|kind| matches!(kind, TokenKind::Bang)) {
       let expr = self.parse_nested(token.span, |parser| parser.parse_unary())?;
       let span = token.span.join(expr.span());
-      let serialized_depth = 2 + expr.serialized_depth;
-      return ParsedExpression::checked(
-        ExprKind::Unary {
+      let serialized_depth = self.add_depth(2, expr.serialized_depth, span)?;
+      return self.make_expression(
+        || ExprKind::Unary {
           op: UnaryOp::Not,
           expr: Box::new(expr.ast),
         },
@@ -242,9 +245,9 @@ impl Parser {
     if let Some(token) = self.consume_kind(|kind| matches!(kind, TokenKind::Minus)) {
       let expr = self.parse_nested(token.span, |parser| parser.parse_unary())?;
       let span = token.span.join(expr.span());
-      let serialized_depth = 2 + expr.serialized_depth;
-      return ParsedExpression::checked(
-        ExprKind::Unary {
+      let serialized_depth = self.add_depth(2, expr.serialized_depth, span)?;
+      return self.make_expression(
+        || ExprKind::Unary {
           op: UnaryOp::Neg,
           expr: Box::new(expr.ast),
         },
@@ -269,9 +272,11 @@ impl Parser {
       {
         let (args, end_span) = self.parse_call_args()?;
         let span = expression.span().join(end_span);
-        let serialized_depth = (2 + expression.serialized_depth).max(3 + args.max_serialized_depth);
-        expression = ParsedExpression::checked(
-          ExprKind::MethodCall {
+        let receiver_depth = self.add_depth(2, expression.serialized_depth, span)?;
+        let args_depth = self.add_depth(3, args.max_serialized_depth, span)?;
+        let serialized_depth = receiver_depth.max(args_depth);
+        expression = self.make_expression(
+          || ExprKind::MethodCall {
             receiver: Box::new(expression.ast),
             name,
             args: args.expressions,
@@ -281,9 +286,9 @@ impl Parser {
         )?;
       } else {
         let span = expression.span().join(self.previous_span());
-        let serialized_depth = 2 + expression.serialized_depth;
-        expression = ParsedExpression::checked(
-          ExprKind::Member {
+        let serialized_depth = self.add_depth(2, expression.serialized_depth, span)?;
+        expression = self.make_expression(
+          || ExprKind::Member {
             receiver: Box::new(expression.ast),
             name,
           },
@@ -298,24 +303,12 @@ impl Parser {
   fn parse_primary(&mut self) -> Result<ParsedExpression, DiagnosticReport> {
     let token = self.advance().clone();
     match token.kind {
-      TokenKind::True => Ok(ParsedExpression::leaf(
-        ExprKind::Bool { value: true },
-        token.span,
-      )),
-      TokenKind::False => Ok(ParsedExpression::leaf(
-        ExprKind::Bool { value: false },
-        token.span,
-      )),
-      TokenKind::Null => Ok(ParsedExpression::leaf(ExprKind::Null, token.span)),
-      TokenKind::Int(value) => Ok(ParsedExpression::leaf(ExprKind::Int { value }, token.span)),
-      TokenKind::Float(value) => Ok(ParsedExpression::leaf(
-        ExprKind::Float { value },
-        token.span,
-      )),
-      TokenKind::String(value) => Ok(ParsedExpression::leaf(
-        ExprKind::String { value },
-        token.span,
-      )),
+      TokenKind::True => self.make_leaf(|| ExprKind::Bool { value: true }, token.span),
+      TokenKind::False => self.make_leaf(|| ExprKind::Bool { value: false }, token.span),
+      TokenKind::Null => self.make_leaf(|| ExprKind::Null, token.span),
+      TokenKind::Int(value) => self.make_leaf(|| ExprKind::Int { value }, token.span),
+      TokenKind::Float(value) => self.make_leaf(|| ExprKind::Float { value }, token.span),
+      TokenKind::String(value) => self.make_leaf(|| ExprKind::String { value }, token.span),
       TokenKind::Identifier(name) => {
         validate_identifier(&name, token.span)?;
         if self
@@ -323,9 +316,9 @@ impl Parser {
           .is_some()
         {
           let (args, end_span) = self.parse_call_args()?;
-          let serialized_depth = 3 + args.max_serialized_depth;
-          ParsedExpression::checked(
-            ExprKind::FunctionCall {
+          let serialized_depth = self.add_depth(3, args.max_serialized_depth, token.span)?;
+          self.make_expression(
+            || ExprKind::FunctionCall {
               name,
               args: args.expressions,
             },
@@ -333,10 +326,7 @@ impl Parser {
             serialized_depth,
           )
         } else {
-          Ok(ParsedExpression::leaf(
-            ExprKind::Identifier { name },
-            token.span,
-          ))
+          self.make_leaf(|| ExprKind::Identifier { name }, token.span)
         }
       }
       TokenKind::LParen => {
@@ -354,8 +344,8 @@ impl Parser {
   fn parse_array(&mut self, start_span: SourceSpan) -> Result<ParsedExpression, DiagnosticReport> {
     let mut items = ParsedSequence::default();
     if let Some(end) = self.consume_kind(|kind| matches!(kind, TokenKind::RBracket)) {
-      return ParsedExpression::checked(
-        ExprKind::Array {
+      return self.make_expression(
+        || ExprKind::Array {
           items: items.expressions,
         },
         start_span.join(end.span),
@@ -364,11 +354,12 @@ impl Parser {
     }
 
     loop {
+      self.check_collection_width(items.expressions.len(), self.peek().span)?;
       items.push(self.parse_nested(start_span, |parser| parser.parse_or())?);
       if let Some(end) = self.consume_kind(|kind| matches!(kind, TokenKind::RBracket)) {
-        let serialized_depth = 3 + items.max_serialized_depth;
-        return ParsedExpression::checked(
-          ExprKind::Array {
+        let serialized_depth = self.add_depth(3, items.max_serialized_depth, start_span)?;
+        return self.make_expression(
+          || ExprKind::Array {
             items: items.expressions,
           },
           start_span.join(end.span),
@@ -389,6 +380,7 @@ impl Parser {
 
     loop {
       let span = self.peek().span;
+      self.check_collection_width(args.expressions.len(), span)?;
       args.push(self.parse_nested(span, |parser| parser.parse_or())?);
       if let Some(end) = self.consume_kind(|kind| matches!(kind, TokenKind::RParen)) {
         return Ok((args, end.span));
@@ -478,24 +470,80 @@ impl Parser {
     self.recursion_depth -= 1;
     result
   }
-}
 
-fn binary(
-  left: ParsedExpression,
-  op: BinaryOp,
-  right: ParsedExpression,
-) -> Result<ParsedExpression, DiagnosticReport> {
-  let span = left.span().join(right.span());
-  let serialized_depth = 2 + left.serialized_depth.max(right.serialized_depth);
-  ParsedExpression::checked(
-    ExprKind::Binary {
-      left: Box::new(left.ast),
-      op,
-      right: Box::new(right.ast),
-    },
-    span,
-    serialized_depth,
-  )
+  fn make_leaf(
+    &mut self,
+    kind: impl FnOnce() -> ExprKind,
+    span: SourceSpan,
+  ) -> Result<ParsedExpression, DiagnosticReport> {
+    self.make_expression(kind, span, 2)
+  }
+
+  fn make_expression(
+    &mut self,
+    kind: impl FnOnce() -> ExprKind,
+    span: SourceSpan,
+    serialized_depth: usize,
+  ) -> Result<ParsedExpression, DiagnosticReport> {
+    if serialized_depth > MAX_AST_SERIALIZED_DEPTH {
+      return Err(DiagnosticReport::single(AST_DEPTH_EXCEEDED, span));
+    }
+    let nodes = self
+      .ast_nodes
+      .checked_add(1)
+      .ok_or_else(|| DiagnosticReport::single(AST_NODE_LIMIT_EXCEEDED, span))?;
+    if nodes > self.limits.max_ast_nodes {
+      return Err(DiagnosticReport::single(AST_NODE_LIMIT_EXCEEDED, span));
+    }
+    self.ast_nodes = nodes;
+    Ok(ParsedExpression {
+      ast: AstExpression::new(kind(), span),
+      serialized_depth,
+    })
+  }
+
+  fn add_depth(
+    &self,
+    outer: usize,
+    inner: usize,
+    span: SourceSpan,
+  ) -> Result<usize, DiagnosticReport> {
+    outer
+      .checked_add(inner)
+      .ok_or_else(|| DiagnosticReport::single(AST_DEPTH_EXCEEDED, span))
+  }
+
+  fn check_collection_width(
+    &self,
+    current_len: usize,
+    span: SourceSpan,
+  ) -> Result<(), DiagnosticReport> {
+    if current_len >= self.limits.max_collection_items {
+      Err(DiagnosticReport::single(COLLECTION_LIMIT_EXCEEDED, span))
+    } else {
+      Ok(())
+    }
+  }
+
+  fn binary(
+    &mut self,
+    left: ParsedExpression,
+    op: BinaryOp,
+    right: ParsedExpression,
+  ) -> Result<ParsedExpression, DiagnosticReport> {
+    let span = left.span().join(right.span());
+    let inner = left.serialized_depth.max(right.serialized_depth);
+    let serialized_depth = self.add_depth(2, inner, span)?;
+    self.make_expression(
+      || ExprKind::Binary {
+        left: Box::new(left.ast),
+        op,
+        right: Box::new(right.ast),
+      },
+      span,
+      serialized_depth,
+    )
+  }
 }
 
 fn validate_identifier(identifier: &str, span: SourceSpan) -> Result<(), DiagnosticReport> {

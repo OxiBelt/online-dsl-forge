@@ -1,15 +1,47 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::parser::{AstExpression, Diagnostic, SourceSpan};
+use crate::parser::{AstExpression, Diagnostic, ExprKind, SourceSpan};
 use crate::sema::schema::{ExpressionFunction, ExpressionFunctionScope, SignatureMatch};
 use crate::sema::verified::{VerifiedExprKind, VerifiedExpression};
 
-use super::support::{ExprAnalysis, LocalBinding, function_calls, substitute_expression};
+use super::support::{ExprAnalysis, LocalBinding, function_calls};
 use super::{AnalyzeState, ExpressionFunctionMode};
 
 type FunctionKey = (ExpressionFunctionScope, String);
 
 impl<'a> AnalyzeState<'a> {
+  pub(super) fn inline_binding(&self, name: &str) -> Option<&'a AstExpression> {
+    self.inline_bindings.last().and_then(|(params, args)| {
+      params
+        .iter()
+        .zip(args.iter())
+        .find_map(|(param, arg)| (param == name).then_some(arg))
+    })
+  }
+
+  pub(super) fn resolve_inline_argument(
+    &self,
+    mut expression: &'a AstExpression,
+  ) -> &'a AstExpression {
+    if self.analyzer.expression_function_mode != ExpressionFunctionMode::Inline {
+      return expression;
+    }
+    for (params, args) in self.inline_bindings.iter().rev() {
+      let ExprKind::Identifier { name } = &expression.kind else {
+        break;
+      };
+      let Some(argument) = params
+        .iter()
+        .zip(args.iter())
+        .find_map(|(param, argument)| (param == name).then_some(argument))
+      else {
+        break;
+      };
+      expression = argument;
+    }
+    expression
+  }
+
   pub(super) fn current_function_scope(&self) -> ExpressionFunctionScope {
     self
       .active_functions
@@ -31,17 +63,13 @@ impl<'a> AnalyzeState<'a> {
       self.validate_function_signature(function);
     }
 
-    let mut permanent = HashSet::new();
-    let mut temporary = HashSet::new();
-    for function in self.schema.expression_functions() {
-      self.validate_function_node(function, &mut permanent, &mut temporary);
-    }
+    self.validate_function_cycles();
   }
 
   pub(super) fn analyze_expression_function(
     &mut self,
-    function: &ExpressionFunction,
-    args: &[AstExpression],
+    function: &'a ExpressionFunction,
+    args: &'a [AstExpression],
     span: SourceSpan,
     depth: usize,
   ) -> ExprAnalysis {
@@ -79,25 +107,20 @@ impl<'a> AnalyzeState<'a> {
       return ExprAnalysis::leaf(VerifiedExpression::new(VerifiedExprKind::Null, span), None);
     }
 
-    let replacements = function
-      .params
-      .iter()
-      .cloned()
-      .zip(args.iter().cloned())
-      .collect::<BTreeMap<_, _>>();
-    let substituted = substitute_expression(&function.expression, &replacements);
     self.active_functions.push(key);
-    let mut analysis = self.analyze_expression(&substituted, depth + 1);
+    self.inline_bindings.push((&function.params, args));
+    let mut analysis = self.analyze_expression(&function.expression, depth + 1);
+    self.inline_bindings.pop();
     self.active_functions.pop();
-    analysis.cost += 1;
-    analysis.nodes += 1;
+    analysis.cost = analysis.cost.saturating_add(1);
+    analysis.nodes = analysis.nodes.saturating_add(1);
     analysis
   }
 
   fn analyze_expression_function_call_frame(
     &mut self,
-    function: &ExpressionFunction,
-    args: &[AstExpression],
+    function: &'a ExpressionFunction,
+    args: &'a [AstExpression],
     span: SourceSpan,
     depth: usize,
   ) -> ExprAnalysis {
@@ -122,6 +145,14 @@ impl<'a> AnalyzeState<'a> {
         ),
         None,
       );
+    }
+
+    if !function
+      .params
+      .iter()
+      .all(|param| self.charge_lowered_scalar_bytes(param.len(), span))
+    {
+      return ExprAnalysis::leaf(VerifiedExpression::new(VerifiedExprKind::Null, span), None);
     }
 
     let key = function_key(function);
@@ -162,8 +193,16 @@ impl<'a> AnalyzeState<'a> {
       origin,
       path,
       args_analysis.body_need.merge(body.body_need),
-      args_analysis.nodes + body.nodes + 1,
-      args_analysis.cost + body.cost + 1,
+      args_analysis
+        .nodes
+        .checked_add(body.nodes)
+        .and_then(|nodes| nodes.checked_add(1))
+        .unwrap_or(usize::MAX),
+      args_analysis
+        .cost
+        .checked_add(body.cost)
+        .and_then(|cost| cost.checked_add(1))
+        .unwrap_or(u64::MAX),
     )
     .with_mitigation_payload(args_analysis.mitigation_payload || body.mitigation_payload)
   }
@@ -199,46 +238,79 @@ impl<'a> AnalyzeState<'a> {
     }
   }
 
-  fn validate_function_node(
-    &mut self,
-    function: &ExpressionFunction,
-    permanent: &mut HashSet<FunctionKey>,
-    temporary: &mut HashSet<FunctionKey>,
-  ) {
-    let key = function_key(function);
-    if permanent.contains(&key) {
-      return;
-    }
-    if !temporary.insert(key.clone()) {
-      self.diagnostics.push(Diagnostic::new(
-        format!("recursive expression function {}", function.name),
-        function.expression.span,
-      ));
-      return;
-    }
-
-    for call in function_calls(&function.expression) {
-      let Some(callee) = self
-        .schema
-        .expression_function_for_scope(&call.name, function.scope)
-      else {
-        self.validate_host_function_call(&call.name, call.arity, call.span);
-        continue;
-      };
-      if callee.params.len() != call.arity {
-        self.diagnostics.push(Diagnostic::new(
-          format!(
-            "function {} does not accept {} arguments",
-            call.name, call.arity
-          ),
-          call.span,
-        ));
+  fn validate_function_cycles(&mut self) {
+    let functions = self
+      .schema
+      .expression_functions()
+      .map(|function| (function_key(function), function))
+      .collect::<BTreeMap<_, _>>();
+    let mut adjacency = BTreeMap::<FunctionKey, Vec<FunctionKey>>::new();
+    for (key, function) in &functions {
+      let mut edges = Vec::new();
+      for call in function_calls(&function.expression) {
+        let Some(callee) = self
+          .schema
+          .expression_function_for_scope(&call.name, function.scope)
+        else {
+          self.validate_host_function_call(&call.name, call.arity, call.span);
+          continue;
+        };
+        if callee.params.len() != call.arity {
+          self.diagnostics.push(Diagnostic::new(
+            format!(
+              "function {} does not accept {} arguments",
+              call.name, call.arity
+            ),
+            call.span,
+          ));
+        }
+        edges.push(function_key(callee));
       }
-      self.validate_function_node(callee, permanent, temporary);
+      adjacency.insert(key.clone(), edges);
     }
 
-    temporary.remove(&key);
-    permanent.insert(key);
+    let mut permanent = BTreeSet::new();
+    for start in functions.keys() {
+      if permanent.contains(start) {
+        continue;
+      }
+      let mut active = BTreeSet::new();
+      let mut stack = vec![(start.clone(), false)];
+      while let Some((key, exiting)) = stack.pop() {
+        if exiting {
+          active.remove(&key);
+          permanent.insert(key);
+          continue;
+        }
+        if permanent.contains(&key) {
+          continue;
+        }
+        if !active.insert(key.clone()) {
+          if let Some(function) = functions.get(&key) {
+            self.diagnostics.push(Diagnostic::new(
+              format!("recursive expression function {}", function.name),
+              function.expression.span,
+            ));
+          }
+          continue;
+        }
+        stack.push((key.clone(), true));
+        if let Some(edges) = adjacency.get(&key) {
+          for edge in edges.iter().rev() {
+            if active.contains(edge) {
+              if let Some(function) = functions.get(edge) {
+                self.diagnostics.push(Diagnostic::new(
+                  format!("recursive expression function {}", function.name),
+                  function.expression.span,
+                ));
+              }
+            } else if !permanent.contains(edge) {
+              stack.push((edge.clone(), false));
+            }
+          }
+        }
+      }
+    }
   }
 
   fn validate_host_function_call(&mut self, name: &str, arity: usize, span: SourceSpan) {

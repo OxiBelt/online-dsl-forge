@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use crate::rulepack_render::error::{RenderResult, fail};
+use crate::rulepack_render::limits::RenderMeter;
 use crate::rulepack_render::types::{
   RenderedRulepackFile, RulepackDocument, RulepackGroupFile, RulepackReferencedFile,
   RulepackReferencedFileKind, RulepackRule,
@@ -9,6 +10,13 @@ use crate::rulepack_render::types::{
 
 pub trait FileResolver {
   fn resolve_file(&self, file: &RulepackReferencedFile) -> RenderResult<String>;
+
+  fn resolve_file_borrowed<'a>(
+    &'a self,
+    _file: &RulepackReferencedFile,
+  ) -> Option<RenderResult<&'a str>> {
+    None
+  }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -39,6 +47,20 @@ impl FileResolver for MemoryFileResolver {
         "referenced rulepack file {key} is missing"
       ))
     })
+  }
+
+  fn resolve_file_borrowed<'a>(
+    &'a self,
+    file: &RulepackReferencedFile,
+  ) -> Option<RenderResult<&'a str>> {
+    let result = logical_path_key(&file.path).and_then(|key| {
+      self.files.get(&key).map(String::as_str).ok_or_else(|| {
+        crate::rulepack_render::RulepackRenderError::new(format!(
+          "referenced rulepack file {key} is missing"
+        ))
+      })
+    });
+    Some(result)
   }
 }
 
@@ -103,6 +125,25 @@ impl FileResolver for BlobFileResolver {
       ))
     })
   }
+
+  fn resolve_file_borrowed<'a>(
+    &'a self,
+    file: &RulepackReferencedFile,
+  ) -> Option<RenderResult<&'a str>> {
+    let result = logical_path_key(&file.path).and_then(|key| {
+      let blob_id = self.path_to_blob.get(&key).ok_or_else(|| {
+        crate::rulepack_render::RulepackRenderError::new(format!(
+          "referenced rulepack file {key} has no blob mapping"
+        ))
+      })?;
+      self.blobs.get(blob_id).ok_or_else(|| {
+        crate::rulepack_render::RulepackRenderError::new(format!(
+          "referenced rulepack file {key} maps to missing blob {blob_id}"
+        ))
+      })
+    });
+    Some(result)
+  }
 }
 
 pub(crate) fn referenced_rulepack_files(
@@ -164,15 +205,29 @@ pub(crate) fn embedded_or_resolved_file<R: FileResolver + ?Sized>(
   embedded: Option<&str>,
   resolver: &R,
   variables: &BTreeMap<String, String>,
+  declared: &std::collections::HashSet<String>,
+  meter: &mut RenderMeter,
+  source: &str,
 ) -> RenderResult<RenderedRulepackFile> {
-  let raw = match embedded {
+  let content = match embedded {
     Some(content) => content.to_string(),
-    None => resolver.resolve_file(&file)?,
+    None => match resolver.resolve_file_borrowed(&file) {
+      Some(raw) => {
+        let raw = raw?;
+        meter.file(raw, source, true)?;
+        super::nested::render_nested_file(raw, file.kind, variables, declared, meter, source)?
+      }
+      None => {
+        let raw = resolver.resolve_file(&file)?;
+        meter.file(&raw, source, true)?;
+        super::nested::render_nested_file(&raw, file.kind, variables, declared, meter, source)?
+      }
+    },
   };
   Ok(RenderedRulepackFile {
     kind: file.kind,
     path: file.path,
-    content: super::render_text(&raw, variables),
+    content,
   })
 }
 

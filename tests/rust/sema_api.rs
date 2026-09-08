@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
-use online_dsl_forge::parse_expression;
 use online_dsl_forge::sema::{
   Analyzer, BodyAccess, BodyNeedSummary, BodyTarget, CapabilityKind, CapabilityMeta,
   CapabilityTicket, CostModel, ExpressionDialect, ExpressionFunctionMode, ExpressionFunctionScope,
   Phase, RegexFlavor, RegexPolicy, RuntimeSchema, SecurityProfile, VerifiedExprKindRef,
 };
+use online_dsl_forge::{AstExpression, ExprKind, SourceSpan, UnaryOp, parse_expression};
 use online_dsl_forge::{EvalLimits, MapRuntime, Value, default_registry, evaluate_verified};
 
 #[test]
@@ -351,6 +351,26 @@ fn generic_safe_can_opt_into_literal_only_regex() {
   let verified = Analyzer::new(profile)
     .analyze(&literal, &schema)
     .expect("literal regex should precompile");
+  assert_eq!(verified.regex_literals().len(), 1);
+  assert_eq!(verified.regex_cache().len(), 1);
+}
+
+#[test]
+fn inline_function_preserves_literal_regex_argument_substitution() {
+  let root = parse_expression("matches_name(\"^pi\")").expect("root should parse");
+  let body = parse_expression("name.matches(pattern)").expect("body should parse");
+  let mut schema = RuntimeSchema::new();
+  schema
+    .add_variable("name")
+    .add_method_capability(
+      CapabilityMeta::method("matches", 1).with_regex_arg(0, RegexFlavor::Default),
+    )
+    .add_expression_function("matches_name", ["pattern"], body);
+  let profile =
+    SecurityProfile::generic_safe().with_regex_policy(RegexPolicy::LiteralOnlyPrecompiled);
+  let verified = Analyzer::new(profile)
+    .analyze(&root, &schema)
+    .expect("substituted literal regex should precompile");
   assert_eq!(verified.regex_literals().len(), 1);
   assert_eq!(verified.regex_cache().len(), 1);
 }
@@ -1011,4 +1031,152 @@ fn oxirule_call_frame_functions_propagate_bound_body_origin() {
     verified.root().kind(),
     VerifiedExprKindRef::ExpressionFunctionCall { .. }
   ));
+}
+
+fn deep_manual_ast(nodes: usize) -> AstExpression {
+  let mut expression = AstExpression::new(ExprKind::Bool { value: true }, SourceSpan::new(0, 1));
+  for _ in 1..nodes {
+    expression = AstExpression::new(
+      ExprKind::Unary {
+        op: UnaryOp::Not,
+        expr: Box::new(expression),
+      },
+      SourceSpan::new(0, 1),
+    );
+  }
+  expression
+}
+
+#[test]
+fn analyzer_preflights_manual_root_and_unreachable_function_bodies() {
+  let deep_root = deep_manual_ast(131);
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&deep_root, &RuntimeSchema::new())
+    .expect_err("manual over-depth root should fail before recursive analysis");
+  assert!(
+    error
+      .to_string()
+      .contains("semantic call depth limit exceeded")
+  );
+
+  let root = parse_expression("true").expect("root should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_expression_function(
+    "unreachable",
+    std::iter::empty::<&str>(),
+    deep_manual_ast(131),
+  );
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&root, &schema)
+    .expect_err("unreachable over-depth function body should be rejected");
+  assert!(
+    error
+      .to_string()
+      .contains("semantic call depth limit exceeded")
+  );
+}
+
+#[test]
+fn analyzer_depth_limit_accepts_exact_boundary_and_rejects_next_node() {
+  let mut profile = SecurityProfile::generic_safe();
+  profile.max_call_depth = 2;
+  Analyzer::new(profile.clone())
+    .analyze(&deep_manual_ast(3), &RuntimeSchema::new())
+    .expect("root depth zero plus two child edges should fit exactly");
+  let error = Analyzer::new(profile)
+    .analyze(&deep_manual_ast(4), &RuntimeSchema::new())
+    .expect_err("third child edge should exceed the semantic depth limit");
+  assert!(
+    error
+      .to_string()
+      .contains("semantic call depth limit exceeded")
+  );
+}
+
+#[test]
+fn analyzer_stops_at_depth_limit_in_long_acyclic_function_chain() {
+  let mut schema = RuntimeSchema::new();
+  schema.add_expression_function(
+    "chain0",
+    std::iter::empty::<&str>(),
+    parse_expression("true").expect("leaf should parse"),
+  );
+  for level in 1..=512 {
+    let body =
+      parse_expression(&format!("chain{}()", level - 1)).expect("chain function should parse");
+    schema.add_expression_function(format!("chain{level}"), std::iter::empty::<&str>(), body);
+  }
+  let root = parse_expression("chain512()").expect("root should parse");
+  let mut profile = SecurityProfile::generic_safe();
+  profile.max_call_depth = usize::MAX;
+  let error = Analyzer::new(profile)
+    .analyze(&root, &schema)
+    .expect_err("large custom depth must retain the stack-safe hard cap");
+  assert!(
+    error
+      .to_string()
+      .contains("semantic call depth limit exceeded")
+  );
+}
+
+fn doubling_schema(levels: usize) -> RuntimeSchema {
+  let mut schema = RuntimeSchema::new();
+  schema.add_expression_function(
+    "double0",
+    ["value"],
+    parse_expression("value + value").expect("base function should parse"),
+  );
+  for level in 1..=levels {
+    let previous = level - 1;
+    let body = parse_expression(&format!(
+      "double{previous}(value) + double{previous}(value)"
+    ))
+    .expect("doubling function should parse");
+    schema.add_expression_function(format!("double{level}"), ["value"], body);
+  }
+  schema
+}
+
+#[test]
+fn inline_function_expansion_is_metered_before_exponential_allocation() {
+  let schema = doubling_schema(13);
+  let ast = parse_expression("double13(1)").expect("root should parse");
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect_err("expanded function should exceed the profile node budget");
+  assert!(error.to_string().contains("AST node limit exceeded"));
+}
+
+#[test]
+fn inline_function_expansion_meters_cloned_scalar_bytes_before_lowering() {
+  let schema = doubling_schema(9);
+  let payload = "x".repeat(128 * 1024);
+  let ast = parse_expression(&format!("double9({payload:?})")).expect("root should parse");
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect_err("expanded string payloads must exceed the hard scalar-byte budget");
+  assert!(
+    error
+      .to_string()
+      .contains("lowered scalar byte limit exceeded")
+  );
+
+  let small = "x".repeat(1024);
+  let ast = parse_expression(&format!("double9({small:?})")).expect("small root should parse");
+  Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect("a small duplicated payload should preserve inline compatibility");
+}
+
+#[test]
+fn smaller_inline_expansion_retains_duplicated_argument_semantics() {
+  let schema = doubling_schema(3);
+  let ast = parse_expression("double3(1)").expect("root should parse");
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect("small inline function should analyze");
+  let runtime = MapRuntime::new(BTreeMap::new(), default_registry());
+  let value = evaluate_verified(&verified, &runtime, EvalLimits::default())
+    .expect("small inline function should evaluate");
+  assert_eq!(value, Value::Int(16));
 }

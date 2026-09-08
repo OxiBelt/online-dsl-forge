@@ -4,8 +4,12 @@ mod error;
 mod exceptions;
 mod files;
 mod input;
+mod limits;
+mod nested;
 mod overrides;
 mod provenance;
+mod serialization;
+mod template;
 mod types;
 mod validation;
 
@@ -15,6 +19,8 @@ use std::path::PathBuf;
 pub use error::RulepackRenderError;
 use error::{RenderResult, fail};
 pub use files::{BlobFileResolver, BlobStore, FileResolver, MemoryFileResolver};
+use limits::RenderMeter;
+pub use limits::RulepackRenderLimits;
 pub use types::{
   RenderedRulepackBundle, RenderedRulepackFile, RulepackActionSelector, RulepackBinding,
   RulepackBindingKind, RulepackDiscovery, RulepackException, RulepackGroupFileSummary,
@@ -29,9 +35,36 @@ use validation::{validate_label, validate_non_empty};
 const SUPPORTED_SCHEMA_VERSION: u32 = 2;
 
 pub fn inspect_rulepack_inputs(raw: &str, source: &str) -> RenderResult<RulepackInputMetadata> {
+  inspect_rulepack_inputs_with_limits(raw, source, RulepackRenderLimits::default())
+}
+
+pub fn inspect_rulepack_inputs_with_limits(
+  raw: &str,
+  source: &str,
+  limits: RulepackRenderLimits,
+) -> RenderResult<RulepackInputMetadata> {
+  let mut meter = RenderMeter::new(limits);
+  meter.manifest(raw, source)?;
   let value = toml_value(raw, source)?;
   let document = document_from_value(value, source)?;
   validate_document_shape(&document, source, ExceptionValidation::Skip)?;
+  meter.files(document.rules.len(), document.group_files.len(), source)?;
+  let declared = declared_names(&document);
+  meter.check_variable_entries(
+    document
+      .variables
+      .iter()
+      .map(|item| (item.name.as_str(), item.default.as_deref().unwrap_or("")))
+      .chain(
+        document
+          .bindings
+          .iter()
+          .map(|item| (item.bind_as.as_str(), "")),
+      ),
+    declared.len(),
+    source,
+  )?;
+  check_embedded_file_sizes(&document, &mut meter, source)?;
   Ok(RulepackInputMetadata {
     summary: summary_from_document(&document, Vec::new()),
     variables: document.variables,
@@ -45,7 +78,17 @@ pub fn inspect_rulepack(
   source: &str,
   options: RulepackRenderOptions,
 ) -> RenderResult<RulepackInspection> {
-  let parsed = ParsedRulepack::parse(raw, source, options)?;
+  inspect_rulepack_with_limits(raw, source, options, RulepackRenderLimits::default())
+}
+
+pub fn inspect_rulepack_with_limits(
+  raw: &str,
+  source: &str,
+  options: RulepackRenderOptions,
+  limits: RulepackRenderLimits,
+) -> RenderResult<RulepackInspection> {
+  let mut meter = RenderMeter::new(limits);
+  let parsed = ParsedRulepack::parse(raw, source, options, &mut meter)?;
   Ok(RulepackInspection {
     summary: parsed.summary(Vec::new()),
     rendered: parsed.rendered,
@@ -55,10 +98,20 @@ pub fn inspect_rulepack(
 pub fn render_rulepack_for_install(
   raw: &str,
   source: &str,
+  options: RulepackRenderOptions,
+) -> RenderResult<String> {
+  render_rulepack_for_install_with_limits(raw, source, options, RulepackRenderLimits::default())
+}
+
+pub fn render_rulepack_for_install_with_limits(
+  raw: &str,
+  source: &str,
   mut options: RulepackRenderOptions,
+  limits: RulepackRenderLimits,
 ) -> RenderResult<String> {
   options.pin_variables = true;
-  Ok(ParsedRulepack::parse(raw, source, options)?.rendered)
+  let mut meter = RenderMeter::new(limits);
+  Ok(ParsedRulepack::parse(raw, source, options, &mut meter)?.rendered)
 }
 
 pub fn referenced_rulepack_files(
@@ -66,7 +119,17 @@ pub fn referenced_rulepack_files(
   source: &str,
   options: RulepackRenderOptions,
 ) -> RenderResult<Vec<RulepackReferencedFile>> {
-  let parsed = ParsedRulepack::parse(raw, source, options)?;
+  referenced_rulepack_files_with_limits(raw, source, options, RulepackRenderLimits::default())
+}
+
+pub fn referenced_rulepack_files_with_limits(
+  raw: &str,
+  source: &str,
+  options: RulepackRenderOptions,
+  limits: RulepackRenderLimits,
+) -> RenderResult<Vec<RulepackReferencedFile>> {
+  let mut meter = RenderMeter::new(limits);
+  let parsed = ParsedRulepack::parse(raw, source, options, &mut meter)?;
   parsed.validate_references()?;
   files::referenced_rulepack_files(&parsed.document)
 }
@@ -77,7 +140,24 @@ pub fn render_rulepack_bundle<R: FileResolver + ?Sized>(
   options: RulepackRenderOptions,
   resolver: &R,
 ) -> RenderResult<RenderedRulepackBundle> {
-  let parsed = ParsedRulepack::parse(raw, source, options)?;
+  render_rulepack_bundle_with_limits(
+    raw,
+    source,
+    options,
+    resolver,
+    RulepackRenderLimits::default(),
+  )
+}
+
+pub fn render_rulepack_bundle_with_limits<R: FileResolver + ?Sized>(
+  raw: &str,
+  source: &str,
+  options: RulepackRenderOptions,
+  resolver: &R,
+  limits: RulepackRenderLimits,
+) -> RenderResult<RenderedRulepackBundle> {
+  let mut meter = RenderMeter::new(limits);
+  let parsed = ParsedRulepack::parse(raw, source, options, &mut meter)?;
   parsed.validate_references()?;
   let mut loaded_files = Vec::new();
   let mut rendered_files = Vec::new();
@@ -91,12 +171,17 @@ pub fn render_rulepack_bundle<R: FileResolver + ?Sized>(
       continue;
     };
     loaded_files.push(file.path.clone());
-    rendered_files.push(files::embedded_or_resolved_file(
+    let rendered_file = files::embedded_or_resolved_file(
       file,
       rule.content.as_deref(),
       resolver,
       &parsed.variables,
-    )?);
+      &parsed.declared,
+      &mut meter,
+      &label,
+    )?;
+    meter.output(rendered_file.content.len(), source)?;
+    rendered_files.push(rendered_file);
   }
   for group_file in &parsed.document.group_files {
     let label = format!("rulepack {} group file", parsed.document.rulepack.name);
@@ -105,12 +190,17 @@ pub fn render_rulepack_bundle<R: FileResolver + ?Sized>(
       continue;
     };
     loaded_files.push(file.path.clone());
-    rendered_files.push(files::embedded_or_resolved_file(
+    let rendered_file = files::embedded_or_resolved_file(
       file,
       group_file.content.as_deref(),
       resolver,
       &parsed.variables,
-    )?);
+      &parsed.declared,
+      &mut meter,
+      &label,
+    )?;
+    meter.output(rendered_file.content.len(), source)?;
+    rendered_files.push(rendered_file);
   }
   Ok(RenderedRulepackBundle {
     summary: parsed.summary(loaded_files),
@@ -120,21 +210,38 @@ pub fn render_rulepack_bundle<R: FileResolver + ?Sized>(
 }
 
 pub fn render_text(raw: &str, variables: &BTreeMap<String, String>) -> String {
-  let mut rendered = raw.to_string();
-  for (name, value) in variables {
-    rendered = rendered.replace(&format!("{{{{{name}}}}}"), value);
-  }
-  rendered
+  template::render_legacy(raw, variables)
+}
+
+pub fn render_text_with_limits(
+  raw: &str,
+  variables: &BTreeMap<String, String>,
+  limits: RulepackRenderLimits,
+) -> RenderResult<String> {
+  let mut meter = RenderMeter::new(limits);
+  meter.manifest(raw, "text template")?;
+  meter.admit_supplied_variables(variables, "text template")?;
+  let declared = variables.keys().cloned().collect();
+  let rendered = template::render_secure(raw, variables, &declared, &mut meter, "text template")?;
+  meter.output(rendered.len(), "text template")?;
+  Ok(rendered)
 }
 
 struct ParsedRulepack {
   document: RulepackDocument,
   rendered: String,
   variables: BTreeMap<String, String>,
+  declared: HashSet<String>,
 }
 
 impl ParsedRulepack {
-  fn parse(raw: &str, source: &str, options: RulepackRenderOptions) -> RenderResult<Self> {
+  fn parse(
+    raw: &str,
+    source: &str,
+    options: RulepackRenderOptions,
+    meter: &mut RenderMeter,
+  ) -> RenderResult<Self> {
+    meter.manifest(raw, source)?;
     let mut value = toml_value(raw, source)?;
     let initial = document_from_value(value.clone(), source)?;
     validate_document_shape(&initial, source, ExceptionValidation::Skip)?;
@@ -144,13 +251,18 @@ impl ParsedRulepack {
       &initial.rulepack.name,
       &options.local_overrides,
     )?;
+    meter.files(initial.rules.len(), initial.group_files.len(), source)?;
+    meter.admit_supplied_variables(&options.variables, source)?;
+    let declared = declared_names(&initial);
     let variables = resolve_variables(
       &initial.variables,
       &initial.bindings,
       &options.variables,
       source,
     )?;
-    render_toml_strings(&mut value, &variables);
+    meter.check_resolved_variables(&variables, declared.len(), source)?;
+    nested::render_manifest_strings(&mut value, &variables, &declared, meter, source)?;
+    nested::render_embedded_files(&mut value, &variables, &declared, meter, source)?;
     overrides::apply_overrides(
       &mut value,
       source,
@@ -174,14 +286,17 @@ impl ParsedRulepack {
     if let Some(provenance) = options.source_provenance {
       provenance::set_rulepack_provenance(&mut value, provenance)?;
     }
+    serialization::reserve_toml_serialization(&value, meter, source, true)?;
     let document = document_from_value(value.clone(), source)?;
     validate_document_shape(&document, source, ExceptionValidation::Full)?;
     let rendered = toml::to_string_pretty(&value)
       .map_err(|error| RulepackRenderError::new(format!("failed to render {source}: {error}")))?;
+    meter.output(rendered.len(), source)?;
     Ok(Self {
       document,
       rendered,
       variables,
+      declared,
     })
   }
 
@@ -210,6 +325,7 @@ impl ParsedRulepack {
 }
 
 fn toml_value(raw: &str, source: &str) -> RenderResult<toml::Value> {
+  template::reject_markers_outside_toml_strings(raw, source)?;
   toml::from_str(raw)
     .map_err(|error| RulepackRenderError::new(format!("failed to parse {source}: {error}")))
 }
@@ -361,26 +477,39 @@ fn resolve_variables(
   Ok(values)
 }
 
-fn render_toml_strings(value: &mut toml::Value, variables: &BTreeMap<String, String>) {
-  match value {
-    toml::Value::String(text) => {
-      *text = render_text(text, variables);
-    }
-    toml::Value::Array(values) => {
-      for value in values {
-        render_toml_strings(value, variables);
-      }
-    }
-    toml::Value::Table(table) => {
-      for (_, value) in table.iter_mut() {
-        render_toml_strings(value, variables);
-      }
-    }
-    toml::Value::Integer(_)
-    | toml::Value::Float(_)
-    | toml::Value::Boolean(_)
-    | toml::Value::Datetime(_) => {}
+fn declared_names(document: &RulepackDocument) -> HashSet<String> {
+  document
+    .variables
+    .iter()
+    .map(|variable| variable.name.clone())
+    .chain(
+      document
+        .bindings
+        .iter()
+        .map(|binding| binding.bind_as.clone()),
+    )
+    .collect()
+}
+
+fn check_embedded_file_sizes(
+  document: &RulepackDocument,
+  meter: &mut RenderMeter,
+  source: &str,
+) -> RenderResult<()> {
+  for content in document
+    .rules
+    .iter()
+    .filter_map(|rule| rule.content.as_deref())
+    .chain(
+      document
+        .group_files
+        .iter()
+        .filter_map(|file| file.content.as_deref()),
+    )
+  {
+    meter.file(content, source, false)?;
   }
+  Ok(())
 }
 
 fn apply_mode_override(

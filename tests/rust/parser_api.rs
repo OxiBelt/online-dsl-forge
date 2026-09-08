@@ -1,3 +1,7 @@
+use online_dsl_forge::parser::{
+  AstFormatLimits, ParseLimits, UnaryOp, format_expression_with_limits,
+  parse_expression_with_limits,
+};
 use online_dsl_forge::{
   AstExpression, DiagnosticReport, ExprKind, SourceSpan, format_expression, parse_expression,
 };
@@ -151,4 +155,185 @@ fn parser_api_bounds_serialized_ast_depth() {
   for input in rejected {
     assert_ast_depth_error(&input);
   }
+}
+
+#[test]
+fn parser_limits_accept_exact_boundaries_and_reject_the_next_unit() {
+  let exact_source = ParseLimits {
+    max_source_bytes: 4,
+    ..ParseLimits::default()
+  };
+  parse_expression_with_limits("true", exact_source).expect("exact source limit should succeed");
+  let error = parse_expression_with_limits("false", exact_source)
+    .expect_err("source beyond limit should fail");
+  assert_eq!(error.diagnostics[0].message, "source byte limit exceeded");
+
+  let exact_tokens = ParseLimits {
+    max_tokens: 2,
+    ..ParseLimits::default()
+  };
+  parse_expression_with_limits("true", exact_tokens).expect("token plus EOF should fit exactly");
+  let error = parse_expression_with_limits(
+    "!true",
+    ParseLimits {
+      max_tokens: 2,
+      ..ParseLimits::default()
+    },
+  )
+  .expect_err("one token beyond limit should fail");
+  assert_eq!(error.diagnostics[0].message, "token limit exceeded");
+
+  parse_expression_with_limits(
+    "abc",
+    ParseLimits {
+      max_decoded_scalar_bytes: 3,
+      ..ParseLimits::default()
+    },
+  )
+  .expect("decoded identifier should fit exactly");
+  let error = parse_expression_with_limits(
+    "abc",
+    ParseLimits {
+      max_decoded_scalar_bytes: 2,
+      ..ParseLimits::default()
+    },
+  )
+  .expect_err("decoded identifier beyond limit should fail");
+  assert_eq!(
+    error.diagnostics[0].message,
+    "decoded scalar byte limit exceeded"
+  );
+
+  parse_expression_with_limits(
+    "1 + 2",
+    ParseLimits {
+      max_ast_nodes: 3,
+      ..ParseLimits::default()
+    },
+  )
+  .expect("three AST nodes should fit exactly");
+  let error = parse_expression_with_limits(
+    "1 + 2",
+    ParseLimits {
+      max_ast_nodes: 2,
+      ..ParseLimits::default()
+    },
+  )
+  .expect_err("third AST node should fail");
+  assert_eq!(error.diagnostics[0].message, "AST node limit exceeded");
+}
+
+#[test]
+fn parser_limits_bound_collections_diagnostics_and_zero_configuration() {
+  for input in ["[a, b]", "f(a, b)"] {
+    parse_expression_with_limits(
+      input,
+      ParseLimits {
+        max_collection_items: 2,
+        ..ParseLimits::default()
+      },
+    )
+    .expect("two collection items should fit exactly");
+    let error = parse_expression_with_limits(
+      input,
+      ParseLimits {
+        max_collection_items: 1,
+        ..ParseLimits::default()
+      },
+    )
+    .expect_err("second collection item should fail");
+    assert_eq!(
+      error.diagnostics[0].message,
+      "collection item limit exceeded"
+    );
+  }
+
+  let diagnostics = online_dsl_forge::lexer::tokenize_with_limits(
+    "@@",
+    ParseLimits {
+      max_diagnostics: 2,
+      ..ParseLimits::default()
+    },
+  )
+  .expect_err("invalid input should report diagnostics");
+  assert_eq!(diagnostics.len(), 2);
+  let diagnostics = online_dsl_forge::lexer::tokenize_with_limits(
+    "@@",
+    ParseLimits {
+      max_diagnostics: 1,
+      ..ParseLimits::default()
+    },
+  )
+  .expect_err("diagnostic overflow should fail terminally");
+  assert_eq!(diagnostics.len(), 1);
+  assert_eq!(diagnostics[0].message, "diagnostic limit exceeded");
+
+  let error = parse_expression_with_limits(
+    "",
+    ParseLimits {
+      max_source_bytes: 0,
+      max_decoded_scalar_bytes: 0,
+      max_tokens: 0,
+      max_diagnostics: 0,
+      max_ast_nodes: 0,
+      max_collection_items: 0,
+    },
+  )
+  .expect_err("zero limits should fail deterministically");
+  assert_eq!(error.diagnostics[0].message, "token limit exceeded");
+}
+
+#[test]
+fn bounded_formatter_is_iterative_and_checks_before_output_growth() {
+  let mut deep = AstExpression::new(ExprKind::Bool { value: true }, SourceSpan::new(0, 1));
+  for _ in 0..128 {
+    deep = AstExpression::new(
+      ExprKind::Unary {
+        op: UnaryOp::Not,
+        expr: Box::new(deep),
+      },
+      SourceSpan::new(0, 1),
+    );
+  }
+  let error = format_expression_with_limits(&deep, AstFormatLimits::default())
+    .expect_err("manual over-depth AST should be rejected without recursion");
+  assert_eq!(
+    error.diagnostics[0].message,
+    "AST format depth limit exceeded"
+  );
+  assert_eq!(
+    format_expression(&deep),
+    "",
+    "the infallible compatibility formatter must fail closed at its default limit"
+  );
+
+  let string = AstExpression::new(
+    ExprKind::String {
+      value: "a\n".to_string(),
+    },
+    SourceSpan::new(0, 1),
+  );
+  assert_eq!(
+    format_expression_with_limits(
+      &string,
+      AstFormatLimits {
+        max_output_bytes: 5,
+        ..AstFormatLimits::default()
+      }
+    )
+    .expect("escaped output should fit exactly"),
+    "\"a\\n\""
+  );
+  let error = format_expression_with_limits(
+    &string,
+    AstFormatLimits {
+      max_output_bytes: 4,
+      ..AstFormatLimits::default()
+    },
+  )
+  .expect_err("escaped output beyond limit should fail");
+  assert_eq!(
+    error.diagnostics[0].message,
+    "AST format output byte limit exceeded"
+  );
 }

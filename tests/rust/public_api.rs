@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use online_dsl_forge::runtime::{
+  RuntimeContext, RuntimeResourceLimits, evaluate_with_resource_limits,
+};
 use online_dsl_forge::{
   Analyzer, BinaryOp, CapabilityMeta, CompileOptions, CostModel, DynamicRegistry, EvalLimits,
   ExpressionDialect, ExpressionFunctionMode, MapRuntime, RegexFlavor, RuntimePatternSetConfig,
@@ -26,6 +29,451 @@ fn public_api_parses_formats_compiles_and_evaluates() {
   let value = evaluate(&compiled, &runtime, EvalLimits::default()).expect("expression should eval");
 
   assert_eq!(value, Value::Bool(true));
+}
+
+#[test]
+fn json_values_reject_unsigned_integer_precision_collisions() {
+  assert_eq!(
+    Value::try_from(serde_json::json!(9223372036854775807_i64)),
+    Ok(Value::Int(i64::MAX))
+  );
+  for input in [
+    "9223372036854775808",
+    "18446744073709551615",
+    "18446744073709551616",
+    "18446744073709551617",
+    "-9223372036854775809",
+  ] {
+    let json: serde_json::Value = serde_json::from_str(input).expect("JSON integer should parse");
+    let error = Value::try_from(json).expect_err("out-of-range JSON integer must fail");
+    assert!(
+      error
+        .to_string()
+        .contains("outside the supported i64 range")
+    );
+  }
+  assert_eq!(
+    Value::try_from(serde_json::json!(-9223372036854775808_i64)),
+    Ok(Value::Int(i64::MIN))
+  );
+  assert!(matches!(
+    Value::try_from(serde_json::json!(1.5)).expect("fraction should convert"),
+    Value::Float(_)
+  ));
+  let exponent: serde_json::Value =
+    serde_json::from_str("1e20").expect("exponent JSON should parse");
+  assert!(matches!(
+    Value::try_from(exponent).expect("exponent should convert"),
+    Value::Float(_)
+  ));
+  let decimal: serde_json::Value =
+    serde_json::from_str("18446744073709551616.0").expect("decimal JSON should parse");
+  assert!(matches!(
+    Value::try_from(decimal).expect("decimal should convert"),
+    Value::Float(_)
+  ));
+
+  let float = Value::Float(f64::from_bits(0x3fd5_5555_5555_5555));
+  let encoded = serde_json::to_vec(&float).expect("runtime float should serialize");
+  let decoded: Value = serde_json::from_slice(&encoded).expect("runtime float should deserialize");
+  assert_eq!(
+    decoded, float,
+    "runtime float JSON must preserve exact bits"
+  );
+}
+
+#[test]
+fn public_json_value_conversion_enforces_a_safe_depth_ceiling() {
+  let mut nested = serde_json::Value::Null;
+  for _ in 0..16_384 {
+    nested = serde_json::Value::Array(vec![nested]);
+  }
+  let json =
+    serde_json::Value::Object(serde_json::Map::from_iter([("nested".to_string(), nested)]));
+  let error = Value::try_from(json).expect_err("deep public conversion must be bounded");
+  assert!(
+    error
+      .to_string()
+      .contains("value graph depth limit exceeded")
+  );
+}
+
+#[test]
+fn public_json_value_conversion_drains_deep_work_on_rejection() {
+  let mut nested = serde_json::Value::Number(serde_json::Number::from(u64::MAX));
+  for _ in 0..100 {
+    nested = serde_json::Value::Array(vec![nested]);
+  }
+  let error = Value::try_from(nested).expect_err("deep unsupported integer must fail");
+  assert!(
+    error
+      .to_string()
+      .contains("outside the supported i64 range")
+  );
+}
+
+#[test]
+fn runtime_rejects_values_above_the_hard_depth_ceiling_and_drains_them() {
+  let mut registry = DynamicRegistry::new();
+  registry.register_function("host", 0, |_| {
+    let mut nested = Value::Null;
+    for _ in 0..16_384 {
+      nested = Value::Array(vec![nested]);
+    }
+    Ok(nested)
+  });
+  let runtime = MapRuntime::new(BTreeMap::new(), registry);
+  let ast = parse_expression("host()").expect("expression should parse");
+  let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+    .expect("expression should compile");
+  let error = evaluate_with_resource_limits(
+    &compiled,
+    &runtime,
+    EvalLimits::default(),
+    RuntimeResourceLimits {
+      max_value_depth: usize::MAX,
+      ..RuntimeResourceLimits::default()
+    },
+  )
+  .expect_err("the hard depth ceiling must apply to custom limits");
+
+  assert!(
+    error
+      .to_string()
+      .contains("value graph depth limit exceeded")
+  );
+}
+
+#[test]
+fn runtime_drains_owned_values_rejected_by_the_cumulative_budget() {
+  let mut registry = DynamicRegistry::new();
+  registry.register_function("host", 0, |_| {
+    let mut nested = Value::Null;
+    for _ in 0..100 {
+      nested = Value::Array(vec![nested]);
+    }
+    Ok(nested)
+  });
+  let runtime = MapRuntime::new(BTreeMap::new(), registry);
+  let ast = parse_expression("host()").expect("expression should parse");
+  let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+    .expect("expression should compile");
+  let error = evaluate_with_resource_limits(
+    &compiled,
+    &runtime,
+    EvalLimits::default(),
+    RuntimeResourceLimits {
+      max_total_value_bytes: 0,
+      ..RuntimeResourceLimits::default()
+    },
+  )
+  .expect_err("the cumulative byte budget must reject the owned result");
+
+  assert!(
+    error
+      .to_string()
+      .contains("runtime cumulative value byte limit exceeded")
+  );
+}
+
+#[test]
+fn runtime_rejects_wide_values_before_scheduling_their_children() {
+  let wide = Value::Array(vec![Value::Null; 65_536]);
+  let error = MapRuntime::try_new_with_limits(
+    BTreeMap::from([("wide".to_string(), wide)]),
+    DynamicRegistry::new(),
+    RuntimeResourceLimits {
+      max_value_nodes: 1,
+      max_value_items: usize::MAX,
+      max_value_bytes: usize::MAX,
+      ..RuntimeResourceLimits::default()
+    },
+  )
+  .err()
+  .expect("a wide graph must fail its projected node count");
+
+  assert!(
+    error
+      .to_string()
+      .contains("value graph node limit exceeded")
+  );
+}
+
+#[test]
+fn map_runtime_drop_drains_legacy_deep_values_iteratively() {
+  let mut nested = Value::Null;
+  for _ in 0..4_096 {
+    nested = Value::Array(vec![nested]);
+  }
+  let runtime = MapRuntime::new(
+    BTreeMap::from([("nested".to_string(), nested)]),
+    DynamicRegistry::new(),
+  );
+  drop(runtime);
+}
+
+#[test]
+fn runtime_resource_limits_are_inclusive_and_bound_graph_shape() {
+  let mut variables = BTreeMap::new();
+  variables.insert("value".to_string(), Value::String("four".to_string()));
+  let runtime = MapRuntime::new(variables, DynamicRegistry::new());
+  let ast = parse_expression("value").expect("expression should parse");
+  let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+    .expect("expression should compile");
+  let exact = RuntimeResourceLimits {
+    max_value_depth: 1,
+    max_value_nodes: 1,
+    max_value_items: 0,
+    max_value_bytes: 5,
+    max_total_value_bytes: 5,
+  };
+  assert_eq!(
+    evaluate_with_resource_limits(&compiled, &runtime, EvalLimits::default(), exact),
+    Ok(Value::String("four".to_string()))
+  );
+  let error = evaluate_with_resource_limits(
+    &compiled,
+    &runtime,
+    EvalLimits::default(),
+    RuntimeResourceLimits {
+      max_value_bytes: 4,
+      ..exact
+    },
+  )
+  .expect_err("the next byte must fail");
+  assert!(
+    error
+      .to_string()
+      .contains("value graph byte limit exceeded")
+  );
+  let error = evaluate_with_resource_limits(
+    &compiled,
+    &runtime,
+    EvalLimits::default(),
+    RuntimeResourceLimits {
+      max_value_nodes: 0,
+      ..exact
+    },
+  )
+  .expect_err("a zero graph node limit rejects even a scalar root");
+  assert!(
+    error
+      .to_string()
+      .contains("value graph node limit exceeded")
+  );
+
+  let wide = Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+  let admitted = MapRuntime::try_new_with_limits(
+    BTreeMap::from([("wide".to_string(), wide.clone())]),
+    DynamicRegistry::new(),
+    RuntimeResourceLimits {
+      max_value_depth: 2,
+      max_value_nodes: 4,
+      max_value_items: 3,
+      max_value_bytes: 4,
+      max_total_value_bytes: 0,
+    },
+  );
+  assert!(admitted.is_ok(), "exact graph limits should succeed");
+  let error = MapRuntime::try_new_with_limits(
+    BTreeMap::from([("wide".to_string(), wide)]),
+    DynamicRegistry::new(),
+    RuntimeResourceLimits {
+      max_value_items: 2,
+      ..RuntimeResourceLimits::default()
+    },
+  )
+  .err()
+  .expect("the next item must fail");
+  assert!(
+    error
+      .to_string()
+      .contains("value graph item limit exceeded")
+  );
+
+  let nested = Value::Array(vec![Value::Array(vec![Value::Int(1)])]);
+  let error = MapRuntime::try_new_with_limits(
+    BTreeMap::from([("nested".to_string(), nested)]),
+    DynamicRegistry::new(),
+    RuntimeResourceLimits {
+      max_value_depth: 2,
+      ..RuntimeResourceLimits::default()
+    },
+  )
+  .err()
+  .expect("the next depth must fail");
+  assert!(
+    error
+      .to_string()
+      .contains("value graph depth limit exceeded")
+  );
+
+  let error = MapRuntime::from_json_bindings_with_limits(
+    serde_json::json!({ "binding": "five" }),
+    RuntimeResourceLimits {
+      max_value_bytes: 4,
+      ..RuntimeResourceLimits::default()
+    },
+  )
+  .err()
+  .expect("JSON bindings must use the same admission limits");
+  assert!(
+    error
+      .to_string()
+      .contains("value graph byte limit exceeded")
+  );
+
+  let exact_json = RuntimeResourceLimits {
+    max_value_depth: 2,
+    max_value_nodes: 2,
+    max_value_items: 1,
+    max_value_bytes: 7,
+    max_total_value_bytes: 0,
+  };
+  assert!(
+    MapRuntime::from_json_bindings_with_limits(serde_json::json!({ "x": "four" }), exact_json,)
+      .is_ok(),
+    "JSON conversion must accept an exactly bounded graph"
+  );
+  let error = MapRuntime::from_json_bindings_with_limits(
+    serde_json::json!({ "x": "four" }),
+    RuntimeResourceLimits {
+      max_value_bytes: 6,
+      ..exact_json
+    },
+  )
+  .err()
+  .expect("the next JSON graph byte must fail during conversion");
+  assert!(
+    error
+      .to_string()
+      .contains("value graph byte limit exceeded")
+  );
+}
+
+#[test]
+fn json_bindings_conversion_rejects_deep_graphs_iteratively() {
+  let mut nested = serde_json::Value::Null;
+  for _ in 0..256 {
+    nested = serde_json::Value::Array(vec![nested]);
+  }
+  let bindings =
+    serde_json::Value::Object(serde_json::Map::from_iter([("nested".to_string(), nested)]));
+  let error = MapRuntime::from_json_bindings_with_limits(
+    bindings,
+    RuntimeResourceLimits {
+      max_value_depth: 8,
+      ..RuntimeResourceLimits::default()
+    },
+  )
+  .err()
+  .expect("deep manually constructed JSON must fail before conversion recurses");
+  assert!(
+    error
+      .to_string()
+      .contains("value graph depth limit exceeded")
+  );
+}
+
+#[test]
+fn runtime_resource_limits_meter_repeated_legacy_context_access() {
+  struct LegacyContext {
+    value: Value,
+    registry: DynamicRegistry,
+  }
+  impl RuntimeContext for LegacyContext {
+    fn get_variable(&self, name: &str) -> Option<Value> {
+      (name == "value").then(|| self.value.clone())
+    }
+
+    fn registry(&self) -> &DynamicRegistry {
+      &self.registry
+    }
+  }
+
+  let context = LegacyContext {
+    value: Value::String("four".to_string()),
+    registry: DynamicRegistry::new(),
+  };
+  let ast = parse_expression("value == value").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("value");
+  let compiled = compile_expression(&ast, &schema, CompileOptions::default())
+    .expect("expression should compile");
+  let error = evaluate_with_resource_limits(
+    &compiled,
+    &context,
+    EvalLimits::default(),
+    RuntimeResourceLimits {
+      max_value_depth: 1,
+      max_value_nodes: 1,
+      max_value_items: 0,
+      max_value_bytes: 5,
+      max_total_value_bytes: 9,
+    },
+  )
+  .expect_err("two accesses must consume the cumulative budget");
+  assert!(
+    error
+      .to_string()
+      .contains("runtime cumulative value byte limit exceeded")
+  );
+}
+
+#[test]
+fn runtime_resource_limits_reject_handler_results_before_reuse() {
+  let mut registry = DynamicRegistry::new();
+  registry.register_function("host", 0, |_| Ok(Value::String("oversized".to_string())));
+  let runtime = MapRuntime::new(BTreeMap::new(), registry);
+  let ast = parse_expression("host()").expect("expression should parse");
+  let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+    .expect("expression should compile");
+  let error = evaluate_with_resource_limits(
+    &compiled,
+    &runtime,
+    EvalLimits::default(),
+    RuntimeResourceLimits {
+      max_value_bytes: 9,
+      ..RuntimeResourceLimits::default()
+    },
+  )
+  .expect_err("handler output must be admitted before it escapes");
+  assert!(
+    error
+      .to_string()
+      .contains("value graph byte limit exceeded")
+  );
+}
+
+#[test]
+fn runtime_resource_limits_meter_object_member_clones_before_equality() {
+  let mut object = BTreeMap::new();
+  object.insert("name".to_string(), Value::String("four".to_string()));
+  let runtime = MapRuntime::new(
+    BTreeMap::from([("item".to_string(), Value::Object(object))]),
+    DynamicRegistry::new(),
+  );
+  let ast = parse_expression("item.name == item.name").expect("expression should parse");
+  let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+    .expect("expression should compile");
+  let error = evaluate_with_resource_limits(
+    &compiled,
+    &runtime,
+    EvalLimits::default(),
+    RuntimeResourceLimits {
+      max_value_depth: 2,
+      max_value_nodes: 2,
+      max_value_items: 1,
+      max_value_bytes: 10,
+      max_total_value_bytes: 29,
+    },
+  )
+  .expect_err("member clones and both equality operands must be metered");
+  assert!(
+    error
+      .to_string()
+      .contains("runtime cumulative value byte limit exceeded")
+  );
 }
 
 #[test]
