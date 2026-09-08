@@ -433,23 +433,28 @@ impl MapRuntime {
     }
   }
 
-  /// Construct a map runtime after checking every host binding against
-  /// `resource_limits`.
+  /// Construct a map runtime after checking the complete host binding object
+  /// against `resource_limits`.
   pub fn try_new_with_limits(
     variables: BTreeMap<String, Value>,
     registry: DynamicRegistry,
     resource_limits: RuntimeResourceLimits,
   ) -> Result<Self, EvalError> {
-    let validation_error = variables
-      .values()
-      .find_map(|value| validate_value(value, resource_limits, None, SourceSpan::default()).err());
-    if let Some(error) = validation_error {
-      for value in variables.into_values() {
-        value.drain_iteratively();
-      }
+    let bindings = Value::Object(variables);
+    if let Err(error) = validate_value(&bindings, resource_limits, None, SourceSpan::default()) {
+      bindings.drain_iteratively();
       return Err(error);
     }
-    Ok(Self::new(variables, registry))
+    match bindings {
+      Value::Object(variables) => Ok(Self::new(variables, registry)),
+      other => {
+        other.drain_iteratively();
+        Err(EvalError::new(
+          "runtime binding admission lost its object wrapper",
+          SourceSpan::default(),
+        ))
+      }
+    }
   }
 
   pub fn from_json_bindings(bindings: serde_json::Value) -> Result<Self, EvalError> {
@@ -471,7 +476,7 @@ impl MapRuntime {
         ));
       }
     };
-    Self::try_new_with_limits(variables, default_registry(), resource_limits)
+    Ok(Self::new(variables, default_registry()))
   }
 
   pub fn schema(&self) -> RuntimeSchema {

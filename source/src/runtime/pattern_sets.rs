@@ -50,6 +50,8 @@ impl RuntimePatternSetConfig {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct RuntimePatternSetLimits {
   pub max_sets: usize,
+  pub max_name_bytes: usize,
+  pub max_total_name_bytes: usize,
   pub max_patterns_per_set: usize,
   pub max_pattern_bytes: usize,
   pub max_total_pattern_bytes: usize,
@@ -61,6 +63,8 @@ impl Default for RuntimePatternSetLimits {
   fn default() -> Self {
     Self {
       max_sets: 256,
+      max_name_bytes: 4096,
+      max_total_name_bytes: 1024 * 1024,
       max_patterns_per_set: 1024,
       max_pattern_bytes: 4096,
       max_total_pattern_bytes: 64 * 1024 * 1024,
@@ -87,6 +91,7 @@ impl RuntimePatternSets {
     limits: RuntimePatternSetLimits,
   ) -> Result<Self, RuntimePatternSetError> {
     let mut admitted = BTreeMap::new();
+    let mut total_name_bytes = 0usize;
     let mut total_pattern_bytes = 0usize;
     let mut total_regex_patterns = 0usize;
     for config in configs {
@@ -96,6 +101,16 @@ impl RuntimePatternSets {
         ));
       }
       let metrics = validate_config(&config, limits)?;
+      total_name_bytes = total_name_bytes
+        .checked_add(config.name.len())
+        .ok_or_else(|| {
+          RuntimePatternSetError::new("runtime pattern set name byte count overflowed")
+        })?;
+      if total_name_bytes > limits.max_total_name_bytes {
+        return Err(RuntimePatternSetError::new(
+          "runtime pattern sets exceed max_total_name_bytes",
+        ));
+      }
       if admitted.contains_key(&config.name) {
         return Err(RuntimePatternSetError::new(format!(
           "duplicate runtime pattern set {}",
@@ -115,7 +130,12 @@ impl RuntimePatternSets {
       total_regex_patterns = total_regex_patterns
         .checked_add(metrics.regex_patterns)
         .ok_or_else(|| RuntimePatternSetError::new("runtime regex pattern count overflowed"))?;
-      admitted.insert(config.name.clone(), (config, metrics));
+      let RuntimePatternSetConfig {
+        name,
+        kind,
+        patterns,
+      } = config;
+      admitted.insert(name, (kind, patterns, metrics));
     }
 
     let projected_compiled_regex_bytes = total_regex_patterns
@@ -128,9 +148,11 @@ impl RuntimePatternSets {
     }
 
     let mut sets = BTreeMap::new();
-    for (name, (config, metrics)) in admitted {
+    for (name, (kind, patterns, metrics)) in admitted {
       let compiled = CompiledRuntimePatternSet::compile(
-        &config,
+        &name,
+        kind,
+        patterns,
         metrics.match_complexity,
         limits.max_compiled_regex_bytes,
       )?;
@@ -256,26 +278,27 @@ enum CompiledRuntimePatternSet {
 
 impl CompiledRuntimePatternSet {
   fn compile(
-    config: &RuntimePatternSetConfig,
+    name: &str,
+    kind: RuntimePatternSetKind,
+    patterns: Vec<String>,
     match_complexity: usize,
     max_compiled_regex_bytes: usize,
   ) -> Result<Self, RuntimePatternSetError> {
-    match config.kind {
+    match kind {
       RuntimePatternSetKind::Contains => Ok(Self::Contains {
-        patterns: config.patterns.clone(),
+        patterns,
         match_complexity,
       }),
       RuntimePatternSetKind::Regex => {
-        let patterns = config
-          .patterns
-          .iter()
+        let patterns = patterns
+          .into_iter()
           .map(|pattern| {
-            let mut builder = RegexBuilder::new(pattern);
+            let mut builder = RegexBuilder::new(&pattern);
             builder.size_limit(max_compiled_regex_bytes);
             builder.build().map_err(|error| {
               RuntimePatternSetError::new(format!(
                 "runtime pattern set {} contains invalid regex pattern: {error}",
-                config.name
+                name
               ))
             })
           })
@@ -344,6 +367,11 @@ fn validate_config(
   config: &RuntimePatternSetConfig,
   limits: RuntimePatternSetLimits,
 ) -> Result<PatternSetMetrics, RuntimePatternSetError> {
+  if config.name.len() > limits.max_name_bytes {
+    return Err(RuntimePatternSetError::new(
+      "runtime pattern set name exceeds max_name_bytes",
+    ));
+  }
   if config.name.trim().is_empty() {
     return Err(RuntimePatternSetError::new(
       "runtime pattern set name must not be empty",

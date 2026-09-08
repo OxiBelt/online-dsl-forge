@@ -5,11 +5,12 @@ use online_dsl_forge::runtime::{
   RuntimeContext, RuntimeResourceLimits, evaluate_with_resource_limits,
 };
 use online_dsl_forge::{
-  Analyzer, BinaryOp, CapabilityMeta, CompileOptions, CostModel, DynamicRegistry, EvalLimits,
-  ExpressionDialect, ExpressionFunctionMode, MapRuntime, RegexFlavor, RuntimePatternSetConfig,
-  RuntimePatternSetLimits, RuntimePatternSets, RuntimeSchema, SecurityProfile, Value,
-  compile_expression, evaluate, evaluate_verified, evaluate_verified_with_resource_limits,
-  format_expression, oxirule_pattern_set_registry, parse_expression,
+  Analyzer, AstExpression, BinaryOp, CapabilityMeta, CompileOptions, CostModel, DynamicRegistry,
+  EvalLimits, ExprKind, ExpressionDialect, ExpressionFunctionMode, MapRuntime, RegexFlavor,
+  RuntimePatternSetConfig, RuntimePatternSetLimits, RuntimePatternSets, RuntimeSchema,
+  SecurityProfile, SourceSpan, Value, compile_expression, evaluate, evaluate_verified,
+  evaluate_verified_with_resource_limits, format_expression, oxirule_pattern_set_registry,
+  parse_expression,
 };
 
 #[test]
@@ -81,6 +82,30 @@ fn json_values_reject_unsigned_integer_precision_collisions() {
     decoded, float,
     "runtime float JSON must preserve exact bits"
   );
+}
+
+#[test]
+fn direct_json_serialization_rejects_non_finite_floats() {
+  for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+    for error in [
+      serde_json::to_value(Value::Float(value))
+        .expect_err("runtime non-finite floats must not serialize as JSON null"),
+      serde_json::to_vec(&Value::Float(value))
+        .expect_err("runtime non-finite floats must not serialize to JSON bytes"),
+      serde_json::to_value(AstExpression::new(
+        ExprKind::Float { value },
+        SourceSpan::default(),
+      ))
+      .expect_err("AST non-finite floats must not serialize as JSON null"),
+      serde_json::to_vec(&AstExpression::new(
+        ExprKind::Float { value },
+        SourceSpan::default(),
+      ))
+      .expect_err("AST non-finite floats must not serialize to JSON bytes"),
+    ] {
+      assert!(error.to_string().contains("expected a finite f64"));
+    }
+  }
 }
 
 #[test]
@@ -320,10 +345,10 @@ fn runtime_resource_limits_are_inclusive_and_bound_graph_shape() {
     BTreeMap::from([("wide".to_string(), wide.clone())]),
     DynamicRegistry::new(),
     RuntimeResourceLimits {
-      max_value_depth: 2,
-      max_value_nodes: 4,
-      max_value_items: 3,
-      max_value_bytes: 4,
+      max_value_depth: 3,
+      max_value_nodes: 5,
+      max_value_items: 4,
+      max_value_bytes: 9,
       max_total_value_bytes: 0,
     },
   );
@@ -402,6 +427,39 @@ fn runtime_resource_limits_are_inclusive_and_bound_graph_shape() {
       .to_string()
       .contains("value graph byte limit exceeded")
   );
+}
+
+#[test]
+fn map_runtime_limits_cover_binding_keys_and_aggregate_shape() {
+  let variables = BTreeMap::from([
+    ("a".to_string(), Value::Null),
+    ("b".to_string(), Value::Null),
+  ]);
+  let exact = RuntimeResourceLimits {
+    max_value_depth: 2,
+    max_value_nodes: 3,
+    max_value_items: 2,
+    max_value_bytes: 5,
+    max_total_value_bytes: 0,
+  };
+  assert!(
+    MapRuntime::try_new_with_limits(variables.clone(), DynamicRegistry::new(), exact).is_ok(),
+    "the complete binding object should accept its exact limits"
+  );
+  for limits in [
+    RuntimeResourceLimits {
+      max_value_items: 1,
+      ..exact
+    },
+    RuntimeResourceLimits {
+      max_value_bytes: 4,
+      ..exact
+    },
+  ] {
+    MapRuntime::try_new_with_limits(variables.clone(), DynamicRegistry::new(), limits)
+      .err()
+      .expect("the next binding item or key byte must fail");
+  }
 }
 
 #[test]
@@ -1100,6 +1158,48 @@ fn runtime_pattern_sets_reject_aggregate_source_before_regex_compilation() {
   assert_eq!(
     error.message(),
     "runtime pattern sets exceed max_total_pattern_bytes"
+  );
+}
+
+#[test]
+fn runtime_pattern_sets_bound_names_before_lookup_or_compilation() {
+  let error = RuntimePatternSets::compile_with_limits(
+    [RuntimePatternSetConfig::regex("long", ["["])],
+    RuntimePatternSetLimits {
+      max_name_bytes: 3,
+      ..RuntimePatternSetLimits::default()
+    },
+  )
+  .expect_err("an oversized name must fail before invalid regex compilation");
+  assert_eq!(
+    error.message(),
+    "runtime pattern set name exceeds max_name_bytes"
+  );
+
+  let configs = || {
+    [
+      RuntimePatternSetConfig::contains("aa", ["a"]),
+      RuntimePatternSetConfig::contains("bbb", ["b"]),
+    ]
+  };
+  let exact = RuntimePatternSetLimits {
+    max_name_bytes: 3,
+    max_total_name_bytes: 5,
+    ..RuntimePatternSetLimits::default()
+  };
+  RuntimePatternSets::compile_with_limits(configs(), exact)
+    .expect("the exact per-name and aggregate name limits should succeed");
+  let error = RuntimePatternSets::compile_with_limits(
+    configs(),
+    RuntimePatternSetLimits {
+      max_total_name_bytes: 4,
+      ..exact
+    },
+  )
+  .expect_err("the next aggregate name byte must fail");
+  assert_eq!(
+    error.message(),
+    "runtime pattern sets exceed max_total_name_bytes"
   );
 }
 

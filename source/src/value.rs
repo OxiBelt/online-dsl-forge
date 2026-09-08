@@ -10,7 +10,13 @@ pub enum Value {
   Null,
   Bool(bool),
   Int(i64),
-  Float(#[serde(deserialize_with = "crate::serde_support::deserialize_f64")] f64),
+  Float(
+    #[serde(
+      deserialize_with = "crate::serde_support::deserialize_f64",
+      serialize_with = "crate::serde_support::serialize_f64"
+    )]
+    f64,
+  ),
   String(String),
   Array(Vec<Value>),
   Object(BTreeMap<String, Value>),

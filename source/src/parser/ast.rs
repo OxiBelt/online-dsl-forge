@@ -25,7 +25,10 @@ pub enum ExprKind {
     value: i64,
   },
   Float {
-    #[serde(deserialize_with = "crate::serde_support::deserialize_f64")]
+    #[serde(
+      deserialize_with = "crate::serde_support::deserialize_f64",
+      serialize_with = "crate::serde_support::serialize_f64"
+    )]
     value: f64,
   },
   String {
