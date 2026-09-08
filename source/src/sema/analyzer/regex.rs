@@ -44,13 +44,16 @@ impl<'a> AnalyzeState<'a> {
 
   fn admit_regex(
     &mut self,
-    pattern: String,
+    pattern: &str,
     flavor: RegexFlavor,
     span: SourceSpan,
     report_invalid: bool,
   ) {
-    let key = (flavor, pattern.clone());
-    if let Some(error) = self.regex_attempts.get(&key) {
+    if let Some(error) = self
+      .regex_attempts
+      .get(&flavor)
+      .and_then(|attempts| attempts.get(pattern))
+    {
       if let Some(error) = error
         && report_invalid
       {
@@ -60,7 +63,7 @@ impl<'a> AnalyzeState<'a> {
         ));
       } else if error.is_none() {
         self.regex_literals.push(RegexLiteral {
-          pattern,
+          pattern: pattern.to_owned(),
           flavor,
           span,
         });
@@ -72,7 +75,7 @@ impl<'a> AnalyzeState<'a> {
       return;
     }
     let literal = RegexLiteral {
-      pattern,
+      pattern: pattern.to_owned(),
       flavor,
       span,
     };
@@ -84,7 +87,12 @@ impl<'a> AnalyzeState<'a> {
       )
       .err()
       .map(|error| error.to_string());
-    self.regex_attempts.insert(key, error.clone());
+    self
+      .regex_attempts
+      .entry(flavor)
+      .or_default()
+      .insert(literal.pattern.clone(), error.clone());
+    self.regex_attempt_count = self.regex_attempt_count.saturating_add(1);
     if let Some(error) = error {
       if report_invalid {
         self.diagnostics.push(Diagnostic::new(
@@ -98,7 +106,7 @@ impl<'a> AnalyzeState<'a> {
   }
 
   fn reserve_regex_source(&mut self, bytes: usize, span: SourceSpan) -> bool {
-    if self.regex_attempts.len() >= self.analyzer.regex_limits.max_unique_regexes {
+    if self.regex_attempt_count >= self.analyzer.regex_limits.max_unique_regexes {
       if !self.regex_count_limit_reported {
         self
           .diagnostics

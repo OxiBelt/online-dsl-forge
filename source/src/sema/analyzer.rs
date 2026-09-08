@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::parser::preflight::preflight_ast;
-use crate::parser::validation::validate_ast_syntax;
+use crate::parser::validation::validate_ast_syntax_with_scalar_limit;
 use crate::parser::{
   AstExpression, BinaryOp, Diagnostic, DiagnosticReport, ExprKind, SourceSpan, UnaryOp,
 };
@@ -101,8 +101,15 @@ impl Analyzer {
     let mut preflight_diagnostics = Vec::new();
     match preflight_ast(expression, self.profile.max_ast_nodes, max_depth) {
       Ok(_) => {
-        if let Err(report) = validate_ast_syntax(expression) {
-          preflight_diagnostics.extend(report.diagnostics);
+        if let Err(report) =
+          validate_ast_syntax_with_scalar_limit(expression, limits::MAX_LOWERED_SCALAR_BYTES)
+        {
+          preflight_diagnostics.extend(report.diagnostics.into_iter().map(|mut diagnostic| {
+            if diagnostic.message == "AST scalar byte limit exceeded" {
+              diagnostic.message = "lowered scalar byte limit exceeded".to_string();
+            }
+            diagnostic
+          }));
         }
       }
       Err(report) => preflight_diagnostics.extend(report.diagnostics),
@@ -168,7 +175,8 @@ struct AnalyzeState<'a> {
   diagnostics: Vec<Diagnostic>,
   regex_literals: Vec<RegexLiteral>,
   regex_cache: CompiledRegexCache,
-  regex_attempts: BTreeMap<(RegexFlavor, String), Option<String>>,
+  regex_attempts: BTreeMap<RegexFlavor, BTreeMap<String, Option<String>>>,
+  regex_attempt_count: usize,
   regex_source_bytes: usize,
   regex_count_limit_reported: bool,
   regex_source_limit_reported: bool,
@@ -193,6 +201,7 @@ impl<'a> AnalyzeState<'a> {
       regex_literals: Vec::new(),
       regex_cache: CompiledRegexCache::default(),
       regex_attempts: BTreeMap::new(),
+      regex_attempt_count: 0,
       regex_source_bytes: 0,
       regex_count_limit_reported: false,
       regex_source_limit_reported: false,
@@ -432,12 +441,12 @@ impl<'a> AnalyzeState<'a> {
       self.analyzer.options.allow_unknown_functions,
       span,
     );
-    let args_analysis = self.analyze_args(args, depth);
     if let Some(capability) = capability {
       self.validate_capability(capability, span);
       self.validate_regex_args(capability, args, span);
       self.require_capability(capability);
     }
+    let args_analysis = self.analyze_args(args, depth);
     let capability_ticket = capability.map(CapabilityMeta::ticket);
     let body_need = args_analysis.consumed_body_need;
     ExprAnalysis::new(
@@ -479,6 +488,9 @@ impl<'a> AnalyzeState<'a> {
       self.analyzer.options.allow_unknown_methods,
       span,
     );
+    if let Some(capability) = capability {
+      self.validate_regex_args(capability, args, span);
+    }
     let args_analysis = self.analyze_args(args, depth);
     let receiver_body_need =
       self.body_need_for_consumed_analysis(receiver.body_need, receiver.origin);
@@ -486,7 +498,6 @@ impl<'a> AnalyzeState<'a> {
     let mitigation_payload = receiver.mitigation_payload || args_analysis.mitigation_payload;
     if let Some(capability) = capability {
       self.validate_capability(capability, span);
-      self.validate_regex_args(capability, args, span);
       self.merge_body_access_for_method(&mut body_need, receiver.origin, capability);
       self.require_capability(capability);
     }

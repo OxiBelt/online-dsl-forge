@@ -3,7 +3,7 @@ use crate::sema::schema::ExpressionFunctionScope;
 
 use super::{AnalyzeState, ExpressionFunctionMode};
 
-const MAX_LOWERED_SCALAR_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const MAX_LOWERED_SCALAR_BYTES: usize = 64 * 1024 * 1024;
 
 impl<'a> AnalyzeState<'a> {
   pub(super) fn preflight_lowering(&mut self, expression: &'a AstExpression) -> bool {

@@ -63,7 +63,7 @@ impl EvalState<'_> {
       VerifiedExprKindRef::Bool(value) => self.admit(Value::Bool(value), span),
       VerifiedExprKindRef::Int(value) => self.admit(Value::Int(value), span),
       VerifiedExprKindRef::Float(value) => self.admit(Value::Float(value), span),
-      VerifiedExprKindRef::String(value) => self.checked_string(value.to_string(), span),
+      VerifiedExprKindRef::String(value) => self.checked_string(value, span),
       VerifiedExprKindRef::Array(items) => self.eval_array(items, context, depth, span),
       VerifiedExprKindRef::Identifier(name) => self.eval_identifier(name, context, span),
       VerifiedExprKindRef::Member { receiver, name } => {
@@ -148,7 +148,14 @@ impl EvalState<'_> {
   ) -> Result<Value, EvalError> {
     if let Some(metrics) = self
       .local_value(name)
-      .map(|value| validate_value(value, self.resource_limits, span))
+      .map(|value| {
+        validate_value(
+          value,
+          self.resource_limits,
+          Some(self.limits.max_string_bytes),
+          span,
+        )
+      })
       .transpose()?
     {
       self.charge(metrics, span)?;
@@ -335,22 +342,34 @@ impl EvalState<'_> {
     }
   }
 
-  fn checked_string(&mut self, value: String, span: SourceSpan) -> Result<Value, EvalError> {
-    if value.len() > self.limits.max_string_bytes {
-      Err(EvalError::new("string byte limit exceeded", span))
-    } else {
-      self.admit(Value::String(value), span)
-    }
+  fn checked_string(&mut self, value: &str, span: SourceSpan) -> Result<Value, EvalError> {
+    self.ensure_string_bytes(value.len(), span)?;
+    let mut result = String::new();
+    result
+      .try_reserve_exact(value.len())
+      .map_err(|_| EvalError::new("runtime string allocation failed", span))?;
+    result.push_str(value);
+    self.admit(Value::String(result), span)
   }
 
   fn clone_admitted(&mut self, value: &Value, span: SourceSpan) -> Result<Value, EvalError> {
-    let metrics = validate_value(value, self.resource_limits, span)?;
+    let metrics = validate_value(
+      value,
+      self.resource_limits,
+      Some(self.limits.max_string_bytes),
+      span,
+    )?;
     self.charge(metrics, span)?;
     Ok(value.clone())
   }
 
   fn admit(&mut self, value: Value, span: SourceSpan) -> Result<Value, EvalError> {
-    let metrics = match validate_value(&value, self.resource_limits, span) {
+    let metrics = match validate_value(
+      &value,
+      self.resource_limits,
+      Some(self.limits.max_string_bytes),
+      span,
+    ) {
       Ok(metrics) => metrics,
       Err(error) => {
         value.drain_iteratively();
@@ -362,6 +381,14 @@ impl EvalState<'_> {
       return Err(error);
     }
     Ok(value)
+  }
+
+  fn ensure_string_bytes(&self, bytes: usize, span: SourceSpan) -> Result<(), EvalError> {
+    if bytes > self.limits.max_string_bytes {
+      Err(EvalError::new("string byte limit exceeded", span))
+    } else {
+      Ok(())
+    }
   }
 
   fn charge(&mut self, metrics: ValueMetrics, span: SourceSpan) -> Result<(), EvalError> {
@@ -387,6 +414,7 @@ impl EvalState<'_> {
       self.program.regex_cache(),
       &self.processed_bytes,
       self.resource_limits.max_total_value_bytes,
+      self.limits.max_string_bytes,
       span,
     )
   }

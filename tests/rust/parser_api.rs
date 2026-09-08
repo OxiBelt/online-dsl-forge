@@ -339,6 +339,28 @@ fn bounded_formatter_is_iterative_and_checks_before_output_growth() {
 }
 
 #[test]
+fn bounded_formatter_rejects_scalar_input_before_identifier_scanning() {
+  let expression = AstExpression::new(
+    ExprKind::Identifier {
+      name: "a".repeat(9),
+    },
+    SourceSpan::new(0, 9),
+  );
+  let error = format_expression_with_limits(
+    &expression,
+    AstFormatLimits {
+      max_output_bytes: 8,
+      ..AstFormatLimits::default()
+    },
+  )
+  .expect_err("identifier input beyond the output budget must fail before scanning");
+  assert_eq!(
+    error.diagnostics[0].message,
+    "AST scalar byte limit exceeded"
+  );
+}
+
+#[test]
 fn arbitrary_ast_formatter_rejects_invalid_syntactic_names() {
   let span = SourceSpan::new(0, 1);
   let receiver = || AstExpression::new(ExprKind::Bool { value: true }, span);

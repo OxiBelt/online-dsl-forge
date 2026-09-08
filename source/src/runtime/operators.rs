@@ -30,12 +30,18 @@ pub(super) fn add_values(
       span,
     ),
     (Value::String(mut left), Value::String(right)) => {
-      left.push_str(&right);
-      if left.len() > max_string_bytes {
-        Err(EvalError::new("string byte limit exceeded", span))
-      } else {
-        Ok(Value::String(left))
+      let output_bytes = left
+        .len()
+        .checked_add(right.len())
+        .ok_or_else(|| EvalError::new("string byte counter overflowed", span))?;
+      if output_bytes > max_string_bytes {
+        return Err(EvalError::new("string byte limit exceeded", span));
       }
+      left
+        .try_reserve(right.len())
+        .map_err(|_| EvalError::new("runtime string allocation failed", span))?;
+      left.push_str(&right);
+      Ok(Value::String(left))
     }
     (left, right) => Err(type_error("+", &left, &right, span)),
   }

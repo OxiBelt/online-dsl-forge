@@ -196,9 +196,9 @@ fn collect_function_calls<'a>(
   }
 }
 
-pub(super) fn string_literal(expression: &AstExpression) -> Option<String> {
+pub(super) fn string_literal(expression: &AstExpression) -> Option<&str> {
   match &expression.kind {
-    ExprKind::String { value } => Some(value.clone()),
+    ExprKind::String { value } => Some(value),
     _ => None,
   }
 }

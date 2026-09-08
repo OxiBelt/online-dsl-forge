@@ -1,7 +1,7 @@
 use crate::parser::SourceSpan;
 use crate::value::Value;
 
-use super::{DynamicRegistry, EvalError};
+use super::{DynamicRegistry, EvalError, RuntimeCallContext};
 
 pub fn default_registry() -> DynamicRegistry {
   let mut registry = DynamicRegistry::new();
@@ -11,21 +11,41 @@ pub fn default_registry() -> DynamicRegistry {
   registry.register_method("contains_key", 1, contains_key);
   registry.register_method("starts_with", 1, string_method("starts_with"));
   registry.register_method("ends_with", 1, string_method("ends_with"));
-  registry.register_method("lower_ascii", 0, |receiver, _| match receiver {
-    Value::String(value) => Ok(Value::String(value.to_ascii_lowercase())),
-    other => Err(EvalError::new(
-      format!("lower_ascii requires string, got {}", other.type_name()),
-      SourceSpan::default(),
-    )),
+  registry.register_method_with_context("lower_ascii", 0, |context, receiver, _| {
+    ascii_case(context, receiver, "lower_ascii", false)
   });
-  registry.register_method("upper_ascii", 0, |receiver, _| match receiver {
-    Value::String(value) => Ok(Value::String(value.to_ascii_uppercase())),
-    other => Err(EvalError::new(
-      format!("upper_ascii requires string, got {}", other.type_name()),
-      SourceSpan::default(),
-    )),
+  registry.register_method_with_context("upper_ascii", 0, |context, receiver, _| {
+    ascii_case(context, receiver, "upper_ascii", true)
   });
   registry
+}
+
+fn ascii_case(
+  context: RuntimeCallContext<'_>,
+  receiver: &Value,
+  method: &str,
+  uppercase: bool,
+) -> Result<Value, EvalError> {
+  let Value::String(value) = receiver else {
+    return Err(EvalError::new(
+      format!("{method} requires string, got {}", receiver.type_name()),
+      SourceSpan::default(),
+    ));
+  };
+  context.ensure_string_bytes(value.len())?;
+  context.charge_work(value.len())?;
+
+  let mut result = String::new();
+  result
+    .try_reserve_exact(value.len())
+    .map_err(|_| EvalError::new("runtime string allocation failed", context.span()))?;
+  result.push_str(value);
+  if uppercase {
+    result.make_ascii_uppercase();
+  } else {
+    result.make_ascii_lowercase();
+  }
+  Ok(Value::String(result))
 }
 
 fn value_len(value: &Value) -> Result<Value, EvalError> {

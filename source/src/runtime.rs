@@ -442,7 +442,7 @@ impl MapRuntime {
   ) -> Result<Self, EvalError> {
     let validation_error = variables
       .values()
-      .find_map(|value| validate_value(value, resource_limits, SourceSpan::default()).err());
+      .find_map(|value| validate_value(value, resource_limits, None, SourceSpan::default()).err());
     if let Some(error) = validation_error {
       for value in variables.into_values() {
         value.drain_iteratively();
@@ -545,6 +545,7 @@ pub fn evaluate_verified_with_resource_limits(
 pub(super) fn validate_value(
   value: &Value,
   limits: RuntimeResourceLimits,
+  max_string_bytes: Option<usize>,
   span: SourceSpan,
 ) -> Result<ValueMetrics, EvalError> {
   let mut metrics = ValueMetrics::default();
@@ -566,6 +567,9 @@ pub(super) fn validate_value(
 
     match value {
       Value::String(value) => {
+        if max_string_bytes.is_some_and(|limit| value.len() > limit) {
+          return Err(EvalError::new("string byte limit exceeded", span));
+        }
         metrics.bytes = checked_value_metric(metrics.bytes, value.len(), "byte", span)?;
         if metrics.bytes > limits.max_value_bytes {
           return Err(EvalError::new("value graph byte limit exceeded", span));

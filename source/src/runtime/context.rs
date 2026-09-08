@@ -13,6 +13,7 @@ pub struct RuntimeCallContext<'a> {
   regex_cache: &'a CompiledRegexCache,
   processed_bytes: &'a Cell<usize>,
   max_total_bytes: usize,
+  max_string_bytes: usize,
   span: SourceSpan,
 }
 
@@ -22,6 +23,7 @@ impl<'a> RuntimeCallContext<'a> {
     regex_cache: &'a CompiledRegexCache,
     processed_bytes: &'a Cell<usize>,
     max_total_bytes: usize,
+    max_string_bytes: usize,
     span: SourceSpan,
   ) -> Self {
     Self {
@@ -29,6 +31,7 @@ impl<'a> RuntimeCallContext<'a> {
       regex_cache,
       processed_bytes,
       max_total_bytes,
+      max_string_bytes,
       span,
     }
   }
@@ -51,6 +54,15 @@ impl<'a> RuntimeCallContext<'a> {
 
   pub fn span(&self) -> SourceSpan {
     self.span
+  }
+
+  /// Reject a projected string result before a handler allocates it.
+  pub fn ensure_string_bytes(&self, bytes: usize) -> Result<(), EvalError> {
+    if bytes > self.max_string_bytes {
+      Err(EvalError::new("string byte limit exceeded", self.span))
+    } else {
+      Ok(())
+    }
   }
 
   /// Charge input-dependent handler work against the evaluation's cumulative

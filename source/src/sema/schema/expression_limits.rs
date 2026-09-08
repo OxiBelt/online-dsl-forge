@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::parser::preflight::preflight_ast;
-use crate::parser::validation::{is_valid_identifier, validate_ast_syntax};
+use crate::parser::validation::{is_valid_identifier, validate_ast_syntax_with_scalar_limit};
 use crate::parser::{Diagnostic, SourceSpan};
 
 use super::{ExpressionFunction, ExpressionFunctionDiagnostic, RuntimeSchema};
@@ -303,7 +303,19 @@ fn validate_functions<'a>(
         .min(MAX_EXPRESSION_FUNCTION_BODY_DEPTH),
     )
     .map_err(first_diagnostic)?;
-    let syntax = validate_ast_syntax(&function.expression).map_err(first_diagnostic)?;
+    let remaining_scalar_bytes = limits
+      .max_total_body_scalar_bytes
+      .saturating_sub(usage.body_scalar_bytes);
+    let syntax =
+      validate_ast_syntax_with_scalar_limit(&function.expression, remaining_scalar_bytes).map_err(
+        |report| {
+          let mut diagnostic = first_diagnostic(report);
+          if diagnostic.message == "AST scalar byte limit exceeded" {
+            diagnostic.message = "expression function body scalar byte limit exceeded".to_string();
+          }
+          diagnostic
+        },
+      )?;
     checked_charge(
       &mut usage.body_nodes,
       body.nodes,

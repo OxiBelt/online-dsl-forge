@@ -915,6 +915,38 @@ fn expression_function_schema_limits_apply_before_retention() {
 }
 
 #[test]
+fn expression_function_scalar_limit_precedes_name_scanning() {
+  let span = SourceSpan::new(0, 4);
+  let mut schema = RuntimeSchema::new().with_expression_function_limits(ExpressionFunctionLimits {
+    max_total_body_scalar_bytes: 3,
+    ..ExpressionFunctionLimits::default()
+  });
+  schema.add_expression_function(
+    "bounded",
+    std::iter::empty::<&str>(),
+    AstExpression::new(
+      ExprKind::Identifier {
+        name: "four".to_string(),
+      },
+      span,
+    ),
+  );
+  assert_eq!(schema.expression_functions().count(), 0);
+
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(
+      &parse_expression("true").expect("root should parse"),
+      &schema,
+    )
+    .expect_err("the body scalar limit must reject before retention");
+  assert!(
+    error
+      .to_string()
+      .contains("expression function body scalar byte limit exceeded")
+  );
+}
+
+#[test]
 fn expression_function_parameters_are_admitted_before_conversion() {
   use std::cell::Cell;
 

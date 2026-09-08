@@ -6,27 +6,30 @@ pub(crate) struct AstSyntaxMetrics {
   pub(crate) function_calls: usize,
 }
 
-pub(crate) fn validate_ast_syntax(
+pub(crate) fn validate_ast_syntax_with_scalar_limit(
   expression: &AstExpression,
+  max_scalar_bytes: usize,
 ) -> Result<AstSyntaxMetrics, DiagnosticReport> {
   let mut metrics = AstSyntaxMetrics::default();
   let mut pending = vec![expression];
 
   while let Some(expression) = pending.pop() {
     match &expression.kind {
-      ExprKind::String { value } => charge_scalar(&mut metrics, value.len()),
+      ExprKind::String { value } => {
+        charge_scalar(&mut metrics, value.len(), max_scalar_bytes, expression)?;
+      }
       ExprKind::Identifier { name } => {
+        charge_scalar(&mut metrics, name.len(), max_scalar_bytes, expression)?;
         validate_name(name, "identifier", expression)?;
-        charge_scalar(&mut metrics, name.len());
       }
       ExprKind::Member { receiver, name } => {
+        charge_scalar(&mut metrics, name.len(), max_scalar_bytes, expression)?;
         validate_name(name, "member", expression)?;
-        charge_scalar(&mut metrics, name.len());
         pending.push(receiver);
       }
       ExprKind::FunctionCall { name, args } => {
+        charge_scalar(&mut metrics, name.len(), max_scalar_bytes, expression)?;
         validate_name(name, "function", expression)?;
-        charge_scalar(&mut metrics, name.len());
         metrics.function_calls = metrics.function_calls.saturating_add(1);
         pending.extend(args.iter().rev());
       }
@@ -35,8 +38,8 @@ pub(crate) fn validate_ast_syntax(
         name,
         args,
       } => {
+        charge_scalar(&mut metrics, name.len(), max_scalar_bytes, expression)?;
         validate_name(name, "method", expression)?;
-        charge_scalar(&mut metrics, name.len());
         pending.extend(args.iter().rev());
         pending.push(receiver);
       }
@@ -110,6 +113,24 @@ fn validate_name(
   }
 }
 
-fn charge_scalar(metrics: &mut AstSyntaxMetrics, bytes: usize) {
-  metrics.scalar_bytes = metrics.scalar_bytes.saturating_add(bytes);
+fn charge_scalar(
+  metrics: &mut AstSyntaxMetrics,
+  bytes: usize,
+  max_scalar_bytes: usize,
+  expression: &AstExpression,
+) -> Result<(), DiagnosticReport> {
+  let Some(total) = metrics.scalar_bytes.checked_add(bytes) else {
+    return Err(DiagnosticReport::single(
+      "AST scalar byte limit exceeded",
+      expression.span,
+    ));
+  };
+  if total > max_scalar_bytes {
+    return Err(DiagnosticReport::single(
+      "AST scalar byte limit exceeded",
+      expression.span,
+    ));
+  }
+  metrics.scalar_bytes = total;
+  Ok(())
 }

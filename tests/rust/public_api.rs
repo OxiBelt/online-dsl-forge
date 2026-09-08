@@ -114,6 +114,58 @@ fn public_json_value_conversion_drains_deep_work_on_rejection() {
 }
 
 #[test]
+fn public_value_to_json_conversion_is_iterative_and_fallible() {
+  let value = Value::Object(BTreeMap::from([
+    (
+      "items".to_string(),
+      Value::Array(vec![Value::Int(1), Value::Float(1.5)]),
+    ),
+    ("name".to_string(), Value::String("forge".to_string())),
+  ]));
+  assert_eq!(
+    value
+      .try_into_json()
+      .expect("bounded finite values should convert"),
+    serde_json::json!({"items": [1, 1.5], "name": "forge"})
+  );
+
+  let error = Value::Float(f64::NAN)
+    .try_into_json()
+    .expect_err("non-finite values must fail checked conversion");
+  assert!(error.to_string().contains("non-finite float"));
+  assert_eq!(
+    serde_json::Value::from(Value::Float(f64::INFINITY)),
+    serde_json::Value::Null,
+    "the infallible compatibility conversion must fail closed"
+  );
+}
+
+#[test]
+fn public_value_to_json_conversion_drains_over_depth_graphs() {
+  fn nested_value(depth: usize) -> Value {
+    let mut value = Value::Null;
+    for _ in 0..depth {
+      value = Value::Array(vec![value]);
+    }
+    value
+  }
+
+  let error = nested_value(256)
+    .try_into_json()
+    .expect_err("checked conversion must reject an over-depth Value graph");
+  assert!(
+    error
+      .to_string()
+      .contains("value graph depth limit exceeded")
+  );
+  assert_eq!(
+    serde_json::Value::from(nested_value(256)),
+    serde_json::Value::Null,
+    "the compatibility conversion must reject and drain without recursion"
+  );
+}
+
+#[test]
 fn runtime_rejects_values_above_the_hard_depth_ceiling_and_drains_them() {
   let mut registry = DynamicRegistry::new();
   registry.register_function("host", 0, |_| {
@@ -444,6 +496,188 @@ fn runtime_resource_limits_reject_handler_results_before_reuse() {
       .to_string()
       .contains("value graph byte limit exceeded")
   );
+}
+
+#[test]
+fn runtime_string_limit_rejects_literals_and_concatenation() {
+  let runtime = MapRuntime::new(BTreeMap::new(), online_dsl_forge::default_registry());
+  let limits = EvalLimits {
+    max_string_bytes: 3,
+    ..EvalLimits::default()
+  };
+
+  for expression in [r#""four""#, r#""fo" + "ur""#] {
+    let ast = parse_expression(expression).expect("expression should parse");
+    let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+      .expect("expression should compile");
+    let error = evaluate(&compiled, &runtime, limits)
+      .expect_err("oversized string result must fail before allocation");
+    assert!(error.to_string().contains("string byte limit exceeded"));
+  }
+
+  let binding_runtime = MapRuntime::new(
+    BTreeMap::from([("value".to_string(), Value::String("four".to_string()))]),
+    DynamicRegistry::new(),
+  );
+  let ast = parse_expression("value").expect("expression should parse");
+  let compiled = compile_expression(&ast, &binding_runtime.schema(), CompileOptions::default())
+    .expect("expression should compile");
+  let error = evaluate(&compiled, &binding_runtime, limits)
+    .expect_err("oversized binding strings must fail evaluation admission");
+  assert!(error.to_string().contains("string byte limit exceeded"));
+
+  let ast = parse_expression(r#""fo" + "ur""#).expect("expression should parse");
+  let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+    .expect("expression should compile");
+  let value = evaluate(
+    &compiled,
+    &runtime,
+    EvalLimits {
+      max_string_bytes: 4,
+      ..EvalLimits::default()
+    },
+  )
+  .expect("a string exactly at the limit should remain valid");
+  assert_eq!(value, Value::String("four".to_string()));
+}
+
+#[test]
+fn default_ascii_case_methods_preflight_size_and_charge_work() {
+  let runtime = MapRuntime::new(
+    BTreeMap::from([("value".to_string(), Value::String("Four".to_string()))]),
+    online_dsl_forge::default_registry(),
+  );
+  let limits = EvalLimits {
+    max_string_bytes: 3,
+    ..EvalLimits::default()
+  };
+
+  for expression in ["value.lower_ascii()", "value.upper_ascii()"] {
+    let ast = parse_expression(expression).expect("expression should parse");
+    let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+      .expect("expression should compile");
+    let error = evaluate(&compiled, &runtime, limits)
+      .expect_err("ASCII case conversion must preflight its output size");
+    assert!(error.to_string().contains("string byte limit exceeded"));
+  }
+
+  let ast = parse_expression("value.lower_ascii()").expect("expression should parse");
+  let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+    .expect("expression should compile");
+  let value = evaluate(
+    &compiled,
+    &runtime,
+    EvalLimits {
+      max_string_bytes: 4,
+      ..EvalLimits::default()
+    },
+  )
+  .expect("ASCII case conversion exactly at the limit should remain valid");
+  assert_eq!(value, Value::String("four".to_string()));
+
+  let error = evaluate_with_resource_limits(
+    &compiled,
+    &runtime,
+    EvalLimits {
+      max_string_bytes: 4,
+      ..EvalLimits::default()
+    },
+    RuntimeResourceLimits {
+      max_total_value_bytes: 8,
+      ..RuntimeResourceLimits::default()
+    },
+  )
+  .expect_err("ASCII case conversion must charge its linear work before allocation");
+  assert!(
+    error
+      .to_string()
+      .contains("runtime cumulative work byte limit exceeded")
+  );
+}
+
+#[test]
+fn runtime_string_limit_rejects_all_registry_string_results() {
+  fn assert_registry_result_rejected(expression: &str, runtime: MapRuntime) {
+    let ast = parse_expression(expression).expect("expression should parse");
+    let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+      .expect("expression should compile");
+    let error = evaluate(
+      &compiled,
+      &runtime,
+      EvalLimits {
+        max_string_bytes: 3,
+        ..EvalLimits::default()
+      },
+    )
+    .expect_err("oversized registry string output must fail admission");
+    assert!(error.to_string().contains("string byte limit exceeded"));
+  }
+
+  let mut function_registry = DynamicRegistry::new();
+  function_registry.register_function("host", 0, |_| Ok(Value::String("four".to_string())));
+  assert_registry_result_rejected(
+    "host()",
+    MapRuntime::new(BTreeMap::new(), function_registry),
+  );
+
+  let mut nested_registry = DynamicRegistry::new();
+  nested_registry.register_function("host", 0, |_| {
+    Ok(Value::Array(vec![Value::String("four".to_string())]))
+  });
+  assert_registry_result_rejected("host()", MapRuntime::new(BTreeMap::new(), nested_registry));
+
+  let mut method_registry = DynamicRegistry::new();
+  method_registry.register_method("host", 0, |_, _| Ok(Value::String("four".to_string())));
+  assert_registry_result_rejected(
+    "value.host()",
+    MapRuntime::new(
+      BTreeMap::from([("value".to_string(), Value::Bool(true))]),
+      method_registry,
+    ),
+  );
+
+  let mut unary_registry = DynamicRegistry::new();
+  unary_registry.register_unary_operator(online_dsl_forge::UnaryOp::Not, |_| {
+    Ok(Value::String("four".to_string()))
+  });
+  assert_registry_result_rejected(
+    "!value",
+    MapRuntime::new(
+      BTreeMap::from([("value".to_string(), Value::Bool(true))]),
+      unary_registry,
+    ),
+  );
+
+  let mut binary_registry = DynamicRegistry::new();
+  binary_registry
+    .register_binary_operator(BinaryOp::Add, |_, _| Ok(Value::String("four".to_string())));
+  assert_registry_result_rejected(
+    "left + right",
+    MapRuntime::new(
+      BTreeMap::from([
+        ("left".to_string(), Value::Int(1)),
+        ("right".to_string(), Value::Int(2)),
+      ]),
+      binary_registry,
+    ),
+  );
+
+  let mut accepted_registry = DynamicRegistry::new();
+  accepted_registry.register_function("host", 0, |_| Ok(Value::String("four".to_string())));
+  let runtime = MapRuntime::new(BTreeMap::new(), accepted_registry);
+  let ast = parse_expression("host()").expect("expression should parse");
+  let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+    .expect("expression should compile");
+  let value = evaluate(
+    &compiled,
+    &runtime,
+    EvalLimits {
+      max_string_bytes: 4,
+      ..EvalLimits::default()
+    },
+  )
+  .expect("a registry string exactly at the limit should remain valid");
+  assert_eq!(value, Value::String("four".to_string()));
 }
 
 #[test]

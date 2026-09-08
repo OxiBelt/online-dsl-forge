@@ -110,7 +110,7 @@ fn eval_command(args: &[String]) -> Result<(), String> {
   let value =
     evaluate_with_resource_limits(&compiled, &runtime, EvalLimits::default(), resource_limits)
       .map_err(|error| error.to_string())?;
-  let json = serde_json::Value::from(value);
+  let json = value.try_into_json().map_err(|error| error.to_string())?;
   println!(
     "{}",
     serde_json::to_string_pretty(&json).map_err(|error| error.to_string())?
