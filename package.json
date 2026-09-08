@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.0.0",
-  "packageManager": "pnpm@11.23.0+sha512.f00082e5b283a199b74e079da28d155c008fe232f44c8a06ea7ddfa014ecf719fc362f790ecc67b28106ddac2afb24c49a9a079159da560b2ce7d1e98efd11af",
+  "packageManager": "pnpm@12.3.4+sha512.961aa41fb077da3a04a441d9f8e15ebc0c96da8ef710b2eb67bf9ee7cb0610eabd48f1fd85f51cffe73846785fa0f87c56a3a872a1d893f8446741b5cce45457",
   "scripts": {
     "lint": "oxlint \"devops/**/*.ts\" devops/oxlint-plugin.mjs",
     "test": "node --import tsx --test devops/tests/*.test.ts",
@@ -12,16 +12,16 @@
     "versioning:release": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path source/Cargo.toml --package-name online-dsl-forge --lockfile-path Cargo.lock --ref \"$ONLINE_DSL_FORGE_RELEASE_REF\" --release-publish"
   },
   "dependencies": {
-    "@typescriptprime/parsing": "^2.0.1",
+    "@typescriptprime/parsing": "^2.0.2",
     "semver": "^7.8.5",
     "smol-toml": "^1.8.0",
-    "tsx": "^4.23.12",
-    "zod": "^4.4.3"
+    "tsx": "^4.23.13",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.1",
     "@types/semver": "^7.8.0",
-    "oxlint": "^1.79.0",
+    "oxlint": "^1.81.0",
     "oxlint-tsgolint": "^7.0.2001",
     "typescript": "^7.0.2"
   }
