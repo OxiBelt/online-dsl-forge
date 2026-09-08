@@ -15,19 +15,22 @@ and CLI tooling.
 - Single publishable `online-dsl-forge` crate containing the parser, semantic
   analyzer, runtime, and CLI.
 - Handwritten lexer, recursive-descent expression parser, AST, diagnostics,
-  spans, and formatter.
+  spans, and formatter with secure default resource limits and configurable
+  fallible entry points.
 - Runtime schemas, security profiles, capability metadata, body-need inference,
   regex admission, and verified IR.
-- In-memory rulepack manifest rendering with resolver-backed referenced file
-  expansion for host-provided local, remote, or blob-backed bundles.
+- In-memory rulepack manifest rendering with bounded, single-pass typed
+  placeholders and resolver-backed referenced file expansion for host-provided
+  local, remote, or blob-backed bundles.
 - Stable span-carrying AST with `serde` serialization.
 - Deterministic canonical expression formatter.
 - Compile-time validation against host-provided runtime schemas and security
   profiles.
 - Non-WAF `GenericSafe` and `GenericTransform` profiles with opt-in stricter
   regex and body-access admission controls.
-- Bounded in-memory evaluation with a dynamic variable, function, method, and
-  operator registry that evaluates verified programs.
+- Bounded in-memory evaluation with value-graph and cumulative byte metering,
+  plus a dynamic variable, function, method, and operator registry that
+  evaluates verified programs.
 - `online-dsl-forgectl` commands for `check`, `ast`, `fmt`, and `eval`.
 
 The language intentionally excludes loops, assignment, imports, callbacks,

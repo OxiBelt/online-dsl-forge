@@ -12,19 +12,31 @@ dynamic runtime registry, and CLI tooling in one publishable package.
 ## Capabilities
 
 - Handwritten lexer, recursive-descent expression parser, span-carrying AST,
-  diagnostics, and formatter.
+  diagnostics, and bounded formatter.
 - Semantic analyzer, runtime schemas, security profiles, and verified IR.
 - In-memory rulepack rendering for schema v2 manifests, variable pinning,
   local overrides, local exceptions, provenance stamping, and resolver-backed
-  referenced rule/group files.
+  referenced rule/group files, with typed single-pass placeholders.
 - Compile-time validation against host-provided runtime schemas and security
   profiles.
 - Bounded in-memory evaluation with a dynamic variable, function, method, and
-  operator registry that executes sema-verified programs.
+  operator registry that executes sema-verified programs and meters runtime
+  value graphs.
 - `online-dsl-forgectl` commands for `check`, `ast`, `fmt`, and `eval`.
 
 The language intentionally excludes loops, assignment, imports, callbacks,
 external I/O, mutation, async execution, and general-purpose scripting.
+
+The parser, evaluator, JSON binding, and rulepack inspection/rendering
+compatibility entry points use secure default limits. Hosts can set explicit
+budgets with `parse_expression_with_limits`,
+`format_expression_with_limits`, `evaluate_with_resource_limits`,
+`MapRuntime::from_json_bindings_with_limits`, and the rulepack renderer's
+`*_with_limits` functions. Use the fallible formatter and rulepack text
+renderer when an AST or template comes from outside the parser or another
+trusted construction path; the infallible formatter returns an empty string at
+its default budget. Runtime value depth is capped at 128, and JSON integer-form
+tokens outside `i64` are rejected rather than rounded to floats.
 
 ## Quick Start
 

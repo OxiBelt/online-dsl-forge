@@ -61,15 +61,32 @@ arbitrary-precision JSON numbers.
 Parser diagnostics should include a stable message and source span. Diagnostics
 must not panic on malformed input.
 
-Parsing enforces an internal recursion-depth budget for nested expressions and
-reports a diagnostic instead of exhausting the host stack.
+`parse_expression` and `lexer::tokenize` apply `ParseLimits::default()`.
+`parse_expression_with_limits` and `lexer::tokenize_with_limits` let an
+embedding select lower limits. Checks occur before retaining the next token,
+decoded scalar, AST node, diagnostic, or array/call item. Limits are inclusive.
+
+| `ParseLimits` field | Default |
+| --- | ---: |
+| `max_source_bytes` | 1 MiB |
+| `max_decoded_scalar_bytes` | 1 MiB across decoded strings and identifiers |
+| `max_tokens` | 262,144, including EOF |
+| `max_diagnostics` | 1,024 |
+| `max_ast_nodes` | 65,536 |
+| `max_collection_items` | 65,536 per array or argument list |
+
+Parsing also enforces an internal recursion-depth budget for nested
+expressions and reports a diagnostic instead of exhausting the host stack.
 
 Parser-produced ASTs also stay below the default `serde_json` container-depth
 limit so every successful parse can be serialized and deserialized with the
 default configuration. Expressions whose AST would exceed that budget fail
 closed with an `AST depth limit exceeded` diagnostic. This parser guarantee
 does not constrain AST values constructed directly through the public Rust
-types.
+types. Semantic analysis performs an iterative structural preflight over the
+root and every registered expression-function body before recursive work. It
+enforces the selected profile's node limit and caps recursive semantic
+traversal at 128 levels even if a custom profile asks for more.
 
 ## Canonical Formatting
 
@@ -83,6 +100,13 @@ format(parse(format(parse(input)))) == format(parse(input))
 
 Whitespace is normalized around binary operators and after commas. String
 literals are emitted with deterministic escaping.
+
+`format_expression_with_limits` is the fallible boundary for arbitrary public
+AST values. Its defaults allow depth 127, 65,536 nodes, and 4 MiB of output;
+the traversal is iterative and checks the complete shape before formatting.
+`format_expression` remains an infallible compatibility convenience, applies
+the same defaults, and returns an empty string if a directly constructed AST
+exceeds them. Use the fallible entry point when the caller needs a diagnostic.
 
 ## Semantic Validation
 
@@ -140,8 +164,11 @@ against global functions only; local function bodies resolve nested calls
 against local functions first and then global functions.
 
 Expression functions can be lowered in two modes. The default inline mode keeps
-the historical generic behavior by substituting arguments into the function
-body during analysis. `ExpressionFunctionMode::CallFrame` preserves a verified
+the historical substitution semantics while resolving parameters through
+borrowed bindings instead of cloning replacement trees. A dry-run meter rejects
+an acyclic expansion before lowering when it would exceed the profile's AST
+node or effective depth limit, or the hard 64 MiB limit for owned scalar bytes
+in the lowered program. `ExpressionFunctionMode::CallFrame` preserves a verified
 expression-function call node, evaluates arguments exactly once at runtime, and
 evaluates the verified body with parameter locals. This mode is intended for
 OxiRule compatibility, where function arguments are evaluated once and body
@@ -197,7 +224,10 @@ capability ticket before evaluation begins.
 ## Runtime Evaluation
 
 Runtime evaluation receives a compiled expression or verified program, a
-`RuntimeContext`, and `EvalLimits`.
+`RuntimeContext`, `EvalLimits`, and a value-graph resource policy. `evaluate`
+and `evaluate_verified` use `RuntimeResourceLimits::default()`;
+`evaluate_with_resource_limits` and
+`evaluate_verified_with_resource_limits` accept an explicit policy.
 
 The runtime:
 
@@ -213,6 +243,10 @@ The runtime:
   they can inspect the active security profile and use verified precompiled
   regex literals
 - enforces step and recursion-depth limits
+- validates every input, local, member copy, handler result, operator result,
+  intermediate value, and returned value before further use
+- meters value depth, nodes, collection items, logical bytes, and cumulative
+  logical bytes processed by one evaluation
 - fails closed on unknown names, type errors, arity errors, arithmetic
   overflow, division by zero, budget exhaustion, and missing object members
 - short-circuits `&&` and `||`
@@ -229,6 +263,33 @@ part of the verified program, evaluation fails closed with an `EvalError`.
 
 Runtime values are JSON-compatible: null, booleans, integers, floats, strings,
 arrays, and objects.
+
+| `RuntimeResourceLimits` field | Default |
+| --- | ---: |
+| `max_value_depth` | 128 |
+| `max_value_nodes` | 262,144 per graph |
+| `max_value_items` | 262,144 per graph |
+| `max_value_bytes` | 64 MiB per graph |
+| `max_total_value_bytes` | 64 MiB per evaluation |
+
+Logical bytes include one tag byte per node plus string payloads and object
+keys. `MapRuntime::from_json_bindings` applies these defaults while converting
+JSON iteratively, and `MapRuntime::from_json_bindings_with_limits` accepts an
+explicit policy. `MapRuntime::try_new_with_limits` validates existing `Value`
+bindings before constructing a context. The effective value-depth limit is
+capped at 128 even if an explicit policy requests more, and direct
+`Value::try_from(serde_json::Value)` conversion uses the same secure default
+graph limits. JSON tokens written in integer form outside the supported `i64`
+range fail instead of converting to a lossy `f64`, including values above
+`u64::MAX`; fractional and exponent-form JSON numbers remain floats.
+
+`MapRuntime` implements `RuntimeContext::get_variable_borrowed`, which lets the
+evaluator validate before cloning. Existing custom contexts remain compatible
+through `get_variable`, but work performed inside that host method happens
+before the crate can inspect its returned value. Custom contexts that expose
+untrusted or large graphs should implement the borrowed method or enforce an
+equivalent host-side bound. Host function and method execution itself also
+remains host-owned work; returned values are checked before reuse.
 
 Compiled expressions are validation artifacts. Host applications should parse
 and analyze expressions through `online-dsl-forge`; they should not treat
@@ -249,7 +310,7 @@ The render pipeline is deterministic:
 - resolve declared variables and binding render targets from
   `RulepackRenderOptions::variables`, falling back to declared variable
   defaults
-- replace `{{name}}` placeholders in manifest strings
+- replace exact `{{name}}` placeholders in manifest strings as string data
 - apply manifest overrides, then local overrides
 - apply mode override and optional force-mode rule mutation
 - append local exceptions to the manifest
@@ -273,6 +334,42 @@ unknown render variables, missing required variables or bindings, invalid
 ambiguous action overrides, unsafe referenced paths, missing resolver content,
 and exceptions that do not match an active non-stream rule.
 
+Placeholders are single-pass: replacement text is opaque and is never scanned
+again as template source. Placeholder markers in TOML keys or non-string TOML
+syntax are rejected. Referenced rule and group files are parsed as TOML before
+substitution. For a nested `when` field, placeholders are accepted only inside
+DSL string literals; values are inserted into the AST string and emitted by the
+canonical formatter, so a value cannot add an operator, call, or other syntax.
+The placeholder budget counts markers after DSL string escapes are decoded.
+Other nested placeholders remain TOML string data. The rendered nested file is
+parsed and shape-checked again before it is returned.
+
+All rulepack inspection and rendering compatibility entry points use
+`RulepackRenderLimits::default()`. Their `*_with_limits` variants expose the
+same policy to embeddings. Limits are inclusive.
+
+| `RulepackRenderLimits` field | Default |
+| --- | ---: |
+| `max_manifest_bytes` | 8 MiB |
+| `max_referenced_file_bytes` | 8 MiB per file |
+| `max_variable_value_bytes` | 1 MiB |
+| `max_total_variable_bytes` | 8 MiB |
+| `max_variables` | 4,096 |
+| `max_rulepack_files` | 4,096 rules and group files |
+| `max_placeholders` | 262,144 |
+| `max_total_input_bytes` | 64 MiB |
+| `max_total_output_bytes` | 64 MiB of output and retained render work |
+
+The built-in memory and blob resolvers lend content to the renderer so it can
+check a file before copying it. A custom `FileResolver` remains source
+compatible through `resolve_file`; any allocation or external I/O performed
+inside that host implementation precedes crate-owned checks. Implement
+`resolve_file_borrowed` when the resolver already stores content in memory.
+
+`render_text_with_limits` applies strict marker validation and the same
+single-pass behavior. The infallible `render_text` function remains a legacy
+single-pass convenience for trusted templates and variables.
+
 ## CLI
 
 `online-dsl-forgectl` provides:
@@ -283,3 +380,6 @@ and exceptions that do not match an active non-stream rule.
 - `eval EXPR --bindings JSON`: evaluate with JSON object bindings
 
 CLI output should be deterministic and suitable for repository tests.
+Expression arguments and stdin are capped at the parser's 1 MiB default before
+joining or reading further. Inline binding JSON and `--bindings-file` input are
+capped at 64 MiB, then converted with the default runtime graph limits.

@@ -41,7 +41,9 @@ must be idempotent. Successful parses must also round-trip through the default
 `serde_json` recursion limit; more deeply nested AST shapes are rejected by the
 parser. Parsed floats must be finite and must retain their exact `f64` bits
 across that JSON round-trip, including decimal values that require the precise
-float parser.
+float parser. Selector-derived `ParseLimits` and `AstFormatLimits` also drive
+the explicit fallible entry points through zero, exact-boundary, and rejection
+paths.
 
 ### `expression_pipeline`
 
@@ -56,7 +58,9 @@ bounds, and keep capability tickets, metadata, and precompiled regex literals
 aligned. Regex literals retain every admitted source occurrence, while the
 compiled cache contains exactly one entry per unique flavor and pattern pair.
 Repeated compile and evaluation outcomes must be deterministic, and canonical
-formatting must preserve the value or fail-closed error class.
+formatting must preserve the value or fail-closed error class. Runtime bindings
+and both evaluation passes use selector-derived `RuntimeResourceLimits` so
+value-graph and cumulative-byte rejections are part of the target.
 
 ### `rulepack_render`
 
@@ -65,7 +69,9 @@ followed by `---FILES---` and JSON containing `variables`, `files`, and an
 optional `source_commit`. At most eight referenced files are admitted through
 `MemoryFileResolver`; filesystem and network access are outside the target.
 Inspection, reference discovery, install rendering, and bundle rendering must
-return deterministic values or errors.
+return deterministic values or errors. The target calls every public
+`*_with_limits` renderer plus `render_text_with_limits` with selector-derived
+manifest, file, variable, placeholder, input, and output budgets.
 
 ## Running and Reproducing
 

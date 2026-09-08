@@ -19,6 +19,11 @@ Strings support `\\`, `\"`, `\'`, `\n`, `\r`, and `\t` escapes.
 Float literals must resolve to finite `f64` values. Decimal literals outside
 that range fail with an `invalid float literal` diagnostic.
 
+The default parser accepts at most 1 MiB of source, 262,144 tokens, 1 MiB of
+decoded scalar data, 65,536 AST nodes, and 65,536 items in any array or call.
+Embeddings can choose lower bounds with `ParseLimits` and
+`parse_expression_with_limits`.
+
 ## Identifiers
 
 Identifiers start with an ASCII letter or `_` and continue with ASCII letters,
