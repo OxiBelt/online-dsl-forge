@@ -9,19 +9,19 @@ directory, dictionary, coverage landmarks, and regression directory.
 
 The fuzz runner accepts two profiles:
 
-- `stable` uses Rust `1.98.0` without a sanitizer for fast panic and invariant
+- `stable` uses Rust `1.98.1` without a sanitizer for fast panic and invariant
   coverage. It is supported only for smoke runs.
-- `asan` uses `nightly-2026-08-24` with AddressSanitizer. Sustained campaigns
+- `asan` uses `nightly-2026-09-08` with AddressSanitizer. Sustained campaigns
   also enable leak detection and use `llvm-tools-preview` for coverage.
 
 Install the pinned toolchains and `cargo-fuzz` release:
 
 ```sh
-rustup toolchain install 1.98.0 --profile minimal
-rustup toolchain install nightly-2026-08-24 --profile minimal \
+rustup toolchain install 1.98.1 --profile minimal
+rustup toolchain install nightly-2026-09-08 --profile minimal \
   --component llvm-tools-preview
-cargo +1.98.0 install cargo-fuzz --version 0.13.2 --locked
-test "$(cargo +1.98.0 fuzz --version)" = "cargo-fuzz 0.13.2"
+cargo +1.98.1 install cargo-fuzz --version 0.13.2 --locked
+test "$(cargo +1.98.1 fuzz --version)" = "cargo-fuzz 0.13.2"
 ```
 
 The runner writes mutable corpora, crash artifacts, and reproduction reports
@@ -92,7 +92,7 @@ To reproduce one emitted artifact directly, keep the same pinned nightly and
 sanitizer:
 
 ```sh
-cargo +nightly-2026-08-24 fuzz run --sanitizer address \
+cargo +nightly-2026-09-08 fuzz run --sanitizer address \
   expression_pipeline /absolute/path/to/crash-artifact
 ```
 

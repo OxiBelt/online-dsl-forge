@@ -3,8 +3,8 @@ set -Eeuo pipefail
 
 umask 077
 
-readonly FUZZ_STABLE_TOOLCHAIN="1.98.0"
-readonly FUZZ_ASAN_NIGHTLY="nightly-2026-08-24"
+readonly FUZZ_STABLE_TOOLCHAIN="1.98.1"
+readonly FUZZ_ASAN_NIGHTLY="nightly-2026-09-08"
 readonly CARGO_FUZZ_VERSION="0.13.2"
 readonly MAX_SEED_FILES=128
 readonly MAX_SEED_BYTES=524288

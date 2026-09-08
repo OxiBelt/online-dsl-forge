@@ -13,11 +13,11 @@ publish = false
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
-toml = "1.1.4"
+toml = "1.1.5"
 
 [dev-dependencies]
 arbitrary = "1.4.2"
-serde-saphyr = { version = "1.1.0", default-features = false, features = ["deserialize"] }
+serde-saphyr = { version = "1.2.0", default-features = false, features = ["deserialize"] }
 
 [[bin]]
 name = "online-dsl-forgectl"
