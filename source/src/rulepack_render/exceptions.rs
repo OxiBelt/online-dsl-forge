@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::rulepack_render::error::{RenderResult, fail};
+use crate::rulepack_render::limits::RenderMeter;
 use crate::rulepack_render::types::{RulepackException, RulepackPhase, RulepackRule};
 use crate::rulepack_render::validation::{
   validate_cidr, validate_human_text, validate_label, validate_method,
@@ -24,7 +25,7 @@ pub(crate) fn append_local_exceptions(
     return fail(format!("{source} exceptions must be an array of tables"));
   };
   for exception in exceptions {
-    let encoded = toml::Value::try_from(exception.clone()).map_err(|error| {
+    let encoded = toml::Value::try_from(exception).map_err(|error| {
       crate::rulepack_render::RulepackRenderError::new(format!(
         "failed to encode local rulepack exception {}: {error}",
         exception.name
@@ -49,25 +50,55 @@ pub(crate) fn validate_rulepack_exceptions(
 ) -> RenderResult<()> {
   validate_exception_shapes(source, exceptions)?;
   for exception in active_exception_entries(source, exceptions)? {
-    let matches = rules
-      .iter()
-      .filter(|rule| exception_matches_rule(exception, rule))
-      .collect::<Vec<_>>();
-    if matches.is_empty() {
+    let mut matched = false;
+    let mut matched_stream = false;
+    for rule in rules {
+      if exception_matches_rule(exception, rule) {
+        matched = true;
+        matched_stream |= rule.phase == RulepackPhase::Stream;
+      }
+    }
+    if !matched {
       return fail(format!(
         "{source} exception {} did not match any rule",
         exception.name
       ));
     }
-    if matches
-      .iter()
-      .any(|rule| rule.phase == RulepackPhase::Stream)
-    {
+    if matched_stream {
       return fail(format!(
         "{source} exception {} matched a stream-phase rule; rulepack exceptions only support HTTP request-context selectors",
         exception.name
       ));
     }
+  }
+  Ok(())
+}
+
+pub(crate) fn reserve_rulepack_exception_selector_work(
+  source: &str,
+  manifest_exceptions: &[RulepackException],
+  local_exceptions: &[RulepackException],
+  rules: &[RulepackRule],
+  meter: &mut RenderMeter,
+) -> RenderResult<()> {
+  let total_rule_tags = rules.iter().try_fold(0usize, |total, rule| {
+    total.checked_add(rule.tags.len()).ok_or_else(|| {
+      crate::rulepack_render::RulepackRenderError::new(format!(
+        "{source} selector work unit count overflow"
+      ))
+    })
+  })?;
+  for exception in manifest_exceptions.iter().chain(local_exceptions) {
+    let direct_selectors = 1usize
+      .checked_add(exception.rule_ids.len())
+      .and_then(|total| total.checked_add(exception.rule_names.len()))
+      .ok_or_else(|| {
+        crate::rulepack_render::RulepackRenderError::new(format!(
+          "{source} selector work unit count overflow"
+        ))
+      })?;
+    meter.reserve_selector_product(rules.len(), direct_selectors, source)?;
+    meter.reserve_selector_product(total_rule_tags, exception.tags.len(), source)?;
   }
   Ok(())
 }

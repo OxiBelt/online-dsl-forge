@@ -337,3 +337,70 @@ fn bounded_formatter_is_iterative_and_checks_before_output_growth() {
     "AST format output byte limit exceeded"
   );
 }
+
+#[test]
+fn arbitrary_ast_formatter_rejects_invalid_syntactic_names() {
+  let span = SourceSpan::new(0, 1);
+  let receiver = || AstExpression::new(ExprKind::Bool { value: true }, span);
+  let invalid = [
+    AstExpression::new(
+      ExprKind::Identifier {
+        name: "false || privileged()".to_string(),
+      },
+      span,
+    ),
+    AstExpression::new(
+      ExprKind::Member {
+        receiver: Box::new(receiver()),
+        name: "bad-name".to_string(),
+      },
+      span,
+    ),
+    AstExpression::new(
+      ExprKind::FunctionCall {
+        name: "true".to_string(),
+        args: Vec::new(),
+      },
+      span,
+    ),
+    AstExpression::new(
+      ExprKind::MethodCall {
+        receiver: Box::new(receiver()),
+        name: "call()".to_string(),
+        args: Vec::new(),
+      },
+      span,
+    ),
+  ];
+
+  for expression in invalid {
+    let error = format_expression_with_limits(&expression, AstFormatLimits::default())
+      .expect_err("invalid names must fail before formatter output");
+    assert!(
+      error
+        .to_string()
+        .contains("name must follow identifier syntax and must not be reserved")
+    );
+    assert_eq!(format_expression(&expression), "");
+  }
+
+  let valid = AstExpression::new(
+    ExprKind::Identifier {
+      name: "_safe9".to_string(),
+    },
+    span,
+  );
+  assert_eq!(format_expression(&valid), "_safe9");
+}
+
+#[test]
+fn arbitrary_ast_formatter_rejects_non_finite_floats() {
+  let span = SourceSpan::new(0, 1);
+  for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+    let expression = AstExpression::new(ExprKind::Float { value }, span);
+    let error = format_expression_with_limits(&expression, AstFormatLimits::default())
+      .expect_err("non-finite public AST floats must fail before formatter output");
+    assert_eq!(error.diagnostics[0].message, "float value must be finite");
+    assert_eq!(format_expression(&expression), "");
+  }
+}

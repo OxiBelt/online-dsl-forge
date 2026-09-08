@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use online_dsl_forge::sema::{
   Analyzer, BodyAccess, BodyNeedSummary, BodyTarget, CapabilityKind, CapabilityMeta,
-  CapabilityTicket, CostModel, ExpressionDialect, ExpressionFunctionMode, ExpressionFunctionScope,
-  Phase, RegexFlavor, RegexPolicy, RuntimeSchema, SecurityProfile, VerifiedExprKindRef,
+  CapabilityTicket, CostModel, ExpressionDialect, ExpressionFunctionLimits, ExpressionFunctionMode,
+  ExpressionFunctionScope, Phase, RegexAdmissionLimits, RegexFlavor, RegexPolicy, RuntimeSchema,
+  SecurityProfile, VerifiedExprKindRef,
 };
 use online_dsl_forge::{AstExpression, ExprKind, SourceSpan, UnaryOp, parse_expression};
 use online_dsl_forge::{EvalLimits, MapRuntime, Value, default_registry, evaluate_verified};
@@ -353,6 +354,63 @@ fn generic_safe_can_opt_into_literal_only_regex() {
     .expect("literal regex should precompile");
   assert_eq!(verified.regex_literals().len(), 1);
   assert_eq!(verified.regex_cache().len(), 1);
+}
+
+#[test]
+fn regex_admission_limits_unique_patterns_and_total_source_bytes() {
+  let expression =
+    parse_expression("[name.matches('a'), name.matches('b')]").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("name").add_method_capability(
+    CapabilityMeta::method("matches", 1).with_regex_arg(0, RegexFlavor::Default),
+  );
+  let profile =
+    SecurityProfile::generic_safe().with_regex_policy(RegexPolicy::LiteralOnlyPrecompiled);
+  let error = Analyzer::new(profile.clone())
+    .with_regex_admission_limits(RegexAdmissionLimits {
+      max_unique_regexes: 1,
+      ..RegexAdmissionLimits::default()
+    })
+    .analyze(&expression, &schema)
+    .expect_err("the second unique regex must exceed admission");
+  assert!(
+    error
+      .to_string()
+      .contains("unique regex literal limit exceeded")
+  );
+
+  let one = parse_expression("name.matches('aa')").expect("expression should parse");
+  let error = Analyzer::new(profile)
+    .with_regex_admission_limits(RegexAdmissionLimits {
+      max_total_regex_source_bytes: 1,
+      ..RegexAdmissionLimits::default()
+    })
+    .analyze(&one, &schema)
+    .expect_err("regex source bytes must be charged before compilation");
+  assert!(
+    error
+      .to_string()
+      .contains("total regex source byte limit exceeded")
+  );
+}
+
+#[test]
+fn regex_builder_compiled_size_limit_fails_closed() {
+  let expression = parse_expression("name.matches('a{1000}')").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("name").add_method_capability(
+    CapabilityMeta::method("matches", 1).with_regex_arg(0, RegexFlavor::Default),
+  );
+  let profile =
+    SecurityProfile::generic_safe().with_regex_policy(RegexPolicy::LiteralOnlyPrecompiled);
+  let error = Analyzer::new(profile)
+    .with_regex_admission_limits(RegexAdmissionLimits {
+      max_compiled_regex_bytes: 1,
+      ..RegexAdmissionLimits::default()
+    })
+    .analyze(&expression, &schema)
+    .expect_err("the compiled-regex size limit must reject the pattern");
+  assert!(error.to_string().contains("invalid regex pattern"));
 }
 
 #[test]
@@ -827,6 +885,168 @@ fn expression_function_params_are_validated() {
 }
 
 #[test]
+fn expression_function_schema_limits_apply_before_retention() {
+  let limits = ExpressionFunctionLimits {
+    max_functions: 1,
+    ..ExpressionFunctionLimits::default()
+  };
+  let mut schema = RuntimeSchema::new().with_expression_function_limits(limits);
+  schema.add_expression_function(
+    "first",
+    std::iter::empty::<&str>(),
+    parse_expression("true").expect("body should parse"),
+  );
+  schema.add_expression_function(
+    "second",
+    std::iter::empty::<&str>(),
+    parse_expression("true").expect("body should parse"),
+  );
+  assert_eq!(schema.expression_functions().count(), 1);
+
+  let root = parse_expression("true").expect("root should parse");
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&root, &schema)
+    .expect_err("the rejected function must leave a schema diagnostic");
+  assert!(
+    error
+      .to_string()
+      .contains("expression function count limit exceeded")
+  );
+}
+
+#[test]
+fn expression_function_parameters_are_admitted_before_conversion() {
+  use std::cell::Cell;
+
+  struct CountedParam<'a>(&'a Cell<usize>);
+
+  impl From<CountedParam<'_>> for String {
+    fn from(value: CountedParam<'_>) -> Self {
+      value.0.set(value.0.get() + 1);
+      "parameter".to_string()
+    }
+  }
+
+  let converted = Cell::new(0);
+  let params = std::iter::repeat_with(|| CountedParam(&converted)).take(64);
+  let mut schema = RuntimeSchema::new().with_expression_function_limits(ExpressionFunctionLimits {
+    max_total_parameters: 1,
+    ..ExpressionFunctionLimits::default()
+  });
+  schema.add_expression_function(
+    "bounded",
+    params,
+    parse_expression("true").expect("body should parse"),
+  );
+
+  assert_eq!(converted.get(), 1);
+  assert_eq!(schema.expression_functions().count(), 0);
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(
+      &parse_expression("true").expect("root should parse"),
+      &schema,
+    )
+    .expect_err("the second parameter must exceed admission before conversion");
+  assert!(
+    error
+      .to_string()
+      .contains("expression function parameter limit exceeded")
+  );
+}
+
+#[test]
+fn expression_function_diagnostics_are_bounded_before_retention_and_cloning() {
+  let long_name = "f".repeat(4096);
+  let limits = ExpressionFunctionLimits {
+    max_total_name_bytes: 8192,
+    ..ExpressionFunctionLimits::default()
+  };
+  let mut schema = RuntimeSchema::new().with_expression_function_limits(limits);
+  for _ in 0..2 {
+    schema.add_expression_function(
+      long_name.clone(),
+      std::iter::empty::<&str>(),
+      parse_expression("true").expect("body should parse"),
+    );
+  }
+  let diagnostic = &schema.expression_function_diagnostics()[0];
+  assert!(diagnostic.message.len() <= 1024);
+  assert!(diagnostic.diagnostic().message.len() <= 1024);
+
+  let limits = ExpressionFunctionLimits {
+    max_total_name_bytes: 8192,
+    max_total_diagnostic_bytes: 64,
+    ..ExpressionFunctionLimits::default()
+  };
+  let mut schema = RuntimeSchema::new().with_expression_function_limits(limits);
+  for _ in 0..2 {
+    schema.add_expression_function(
+      long_name.clone(),
+      std::iter::empty::<&str>(),
+      parse_expression("true").expect("body should parse"),
+    );
+  }
+  let retained_bytes = schema
+    .expression_function_diagnostics()
+    .iter()
+    .map(|diagnostic| diagnostic.message.len())
+    .sum::<usize>();
+  assert!(retained_bytes <= 64);
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(
+      &parse_expression("true").expect("root should parse"),
+      &schema,
+    )
+    .expect_err("suppressed diagnostics must still fail closed");
+  assert!(
+    error
+      .to_string()
+      .contains("expression function diagnostic limit exceeded")
+  );
+}
+
+#[test]
+fn sema_rejects_invalid_names_in_public_asts_and_function_bodies() {
+  let span = SourceSpan::new(0, 1);
+  let root = AstExpression::new(
+    ExprKind::FunctionCall {
+      name: "false || privileged".to_string(),
+      args: Vec::new(),
+    },
+    span,
+  );
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&root, &RuntimeSchema::new())
+    .expect_err("arbitrary root AST names must be validated before analysis");
+  assert!(
+    error
+      .to_string()
+      .contains("function name must follow identifier syntax")
+  );
+
+  for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+    let root = AstExpression::new(ExprKind::Float { value }, span);
+    let error = Analyzer::new(SecurityProfile::generic_safe())
+      .analyze(&root, &RuntimeSchema::new())
+      .expect_err("non-finite public AST floats must fail before analysis");
+    assert!(error.to_string().contains("float value must be finite"));
+  }
+
+  let mut schema = RuntimeSchema::new();
+  schema.add_expression_function(
+    "helper",
+    ["bad-name"],
+    AstExpression::new(ExprKind::Bool { value: true }, span),
+  );
+  assert_eq!(schema.expression_functions().count(), 0);
+  let valid_root = parse_expression("true").expect("root should parse");
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&valid_root, &schema)
+    .expect_err("invalid function parameters must leave a schema diagnostic");
+  assert!(error.to_string().contains("must be a valid identifier"));
+}
+
+#[test]
 fn expression_function_graph_rejects_recursion() {
   let ast = parse_expression("true").expect("expression should parse");
   let first = parse_expression("second()").expect("function should parse");
@@ -1074,6 +1294,53 @@ fn analyzer_preflights_manual_root_and_unreachable_function_bodies() {
       .to_string()
       .contains("semantic call depth limit exceeded")
   );
+}
+
+#[test]
+fn schema_drains_rejected_deep_function_bodies_iteratively() {
+  let mut schema = RuntimeSchema::new().with_expression_function_limits(ExpressionFunctionLimits {
+    max_body_depth: usize::MAX,
+    ..ExpressionFunctionLimits::default()
+  });
+  schema.add_expression_function(
+    "too_deep",
+    std::iter::empty::<&str>(),
+    deep_manual_ast(16_384),
+  );
+  assert_eq!(schema.expression_functions().count(), 0);
+
+  let root = parse_expression("true").expect("root should parse");
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&root, &schema)
+    .expect_err("rejected deep function must retain a bounded diagnostic");
+  assert!(
+    error
+      .to_string()
+      .contains("semantic call depth limit exceeded")
+  );
+}
+
+#[test]
+fn schema_drains_rejected_wide_function_bodies_without_a_second_wide_buffer() {
+  let span = SourceSpan::new(0, 1);
+  let items = (0..65_536)
+    .map(|_| AstExpression::new(ExprKind::Bool { value: true }, span))
+    .collect();
+  let wide = AstExpression::new(ExprKind::Array { items }, span);
+  let mut schema = RuntimeSchema::new().with_expression_function_limits(ExpressionFunctionLimits {
+    max_total_body_nodes: 1,
+    ..ExpressionFunctionLimits::default()
+  });
+  schema.add_expression_function("too_wide", std::iter::empty::<&str>(), wide);
+  assert_eq!(schema.expression_functions().count(), 0);
+
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(
+      &parse_expression("true").expect("root should parse"),
+      &schema,
+    )
+    .expect_err("rejected wide function must retain a bounded diagnostic");
+  assert!(error.to_string().contains("AST node limit exceeded"));
 }
 
 #[test]

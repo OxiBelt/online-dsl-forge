@@ -63,6 +63,24 @@ pub enum RegexPolicy {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct RegexAdmissionLimits {
+  pub max_unique_regexes: usize,
+  pub max_total_regex_source_bytes: usize,
+  pub max_compiled_regex_bytes: usize,
+}
+
+impl Default for RegexAdmissionLimits {
+  fn default() -> Self {
+    Self {
+      max_unique_regexes: 256,
+      max_total_regex_source_bytes: 1024 * 1024,
+      max_compiled_regex_bytes: 256 * 1024,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Determinism {
   Required,

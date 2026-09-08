@@ -24,9 +24,11 @@ pub(super) fn add_values(
       .checked_add(right)
       .map(Value::Int)
       .ok_or_else(|| EvalError::new("integer addition overflowed", span)),
-    (left, right) if left.is_number() && right.is_number() => {
-      Ok(Value::Float(number_as_f64(&left) + number_as_f64(&right)))
-    }
+    (left, right) if left.is_number() && right.is_number() => finite_float(
+      number_as_f64(&left) + number_as_f64(&right),
+      "floating-point addition produced a non-finite result",
+      span,
+    ),
     (Value::String(mut left), Value::String(right)) => {
       left.push_str(&right);
       if left.len() > max_string_bytes {
@@ -53,13 +55,18 @@ pub(super) fn numeric_arithmetic(
       if matches!(op, BinaryOp::Div | BinaryOp::Rem) && right == 0.0 {
         return Err(EvalError::new("division by zero", span));
       }
-      Ok(Value::Float(match op {
+      let result = match op {
         BinaryOp::Sub => left - right,
         BinaryOp::Mul => left * right,
         BinaryOp::Div => left / right,
         BinaryOp::Rem => left % right,
         _ => return Err(EvalError::new("internal arithmetic dispatch error", span)),
-      }))
+      };
+      finite_float(
+        result,
+        "floating-point arithmetic produced a non-finite result",
+        span,
+      )
     }
     (left, right) => Err(type_error(op.as_str(), &left, &right, span)),
   }
@@ -165,5 +172,13 @@ fn number_as_f64(value: &Value) -> f64 {
     Value::Int(value) => *value as f64,
     Value::Float(value) => *value,
     _ => 0.0,
+  }
+}
+
+fn finite_float(value: f64, message: &str, span: SourceSpan) -> Result<Value, EvalError> {
+  if value.is_finite() {
+    Ok(Value::Float(value))
+  } else {
+    Err(EvalError::new(message, span))
   }
 }

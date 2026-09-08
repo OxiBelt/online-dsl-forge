@@ -1,8 +1,11 @@
 use crate::rulepack_render::error::{RenderResult, fail};
+use crate::rulepack_render::limits::RenderMeter;
 use crate::rulepack_render::types::{
   RulepackActionSelector, RulepackOverride, RulepackOverrideSelector,
 };
 use crate::rulepack_render::validation::{validate_label, validate_rate, validate_status};
+
+const STRING_ALLOCATION_OVERHEAD: usize = 32;
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 enum OverrideScope {
@@ -14,6 +17,23 @@ struct OrderedOverride<'a> {
   scope: OverrideScope,
   index: usize,
   item: &'a RulepackOverride,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ActionProjection {
+  replacement_bytes: usize,
+  rate_growth: usize,
+  body_growth: usize,
+  burst_growth: usize,
+  status_growth: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ActionFieldBounds {
+  rate: usize,
+  body: usize,
+  burst: usize,
+  status: usize,
 }
 
 pub(crate) fn validate_rulepack_overrides(
@@ -33,6 +53,7 @@ pub(crate) fn apply_overrides(
   rulepack_name: &str,
   manifest_overrides: &[RulepackOverride],
   local_overrides: &[RulepackOverride],
+  meter: &mut RenderMeter,
 ) -> RenderResult<()> {
   let overrides = ordered_overrides(manifest_overrides, local_overrides);
   if overrides.is_empty() {
@@ -43,7 +64,7 @@ pub(crate) fn apply_overrides(
       "{source} overrides require at least one [[rules]] entry"
     ));
   };
-  let mut match_counts = vec![0usize; overrides.len()];
+  preflight_override_application(rules, source, rulepack_name, &overrides, meter)?;
   let mut rendered_rules = Vec::with_capacity(rules.len());
   for rule_value in rules.iter() {
     let Some(original_rule) = rule_value.as_table() else {
@@ -51,16 +72,57 @@ pub(crate) fn apply_overrides(
     };
     let mut rendered_rule = toml::Value::Table(original_rule.clone());
     let mut enabled = true;
-    for (position, ordered) in overrides.iter().enumerate() {
-      if !selector_matches_rule(rulepack_name, &ordered.item.selector, original_rule) {
-        continue;
+    for ordered in &overrides {
+      if selector_matches_rule(rulepack_name, &ordered.item.selector, original_rule) {
+        apply_override_to_rule(source, ordered.item, &mut rendered_rule, &mut enabled)?;
       }
-      match_counts[position] += 1;
-      apply_override_to_rule(source, ordered.item, &mut rendered_rule, &mut enabled)?;
     }
     if enabled {
       rendered_rules.push(rendered_rule);
     }
+  }
+  *rules = rendered_rules;
+  Ok(())
+}
+
+fn preflight_override_application(
+  rules: &[toml::Value],
+  source: &str,
+  rulepack_name: &str,
+  overrides: &[OrderedOverride<'_>],
+  meter: &mut RenderMeter,
+) -> RenderResult<()> {
+  reserve_override_selector_work(rules, overrides, meter, source)?;
+  let projections = overrides
+    .iter()
+    .map(|ordered| action_projection(ordered.item, source))
+    .collect::<RenderResult<Vec<_>>>()?;
+
+  let mut match_counts = vec![0usize; overrides.len()];
+  let mut projected_render_work = 0usize;
+  for rule_value in rules {
+    projected_render_work = checked_add(
+      projected_render_work,
+      crate::rulepack_render::serialization::estimate_value(rule_value, 1, source)?,
+      "projected override render byte count",
+      source,
+    )?;
+    let Some(rule) = rule_value.as_table() else {
+      return fail(format!("{source} rules entries must be tables"));
+    };
+    let mut matches = Vec::new();
+    for (position, ordered) in overrides.iter().enumerate() {
+      if selector_matches_rule(rulepack_name, &ordered.item.selector, rule) {
+        match_counts[position] += 1;
+        matches.push(position);
+      }
+    }
+    projected_render_work = checked_add(
+      projected_render_work,
+      preflight_action_overrides(rule, &matches, overrides, &projections, source, meter)?,
+      "projected override render byte count",
+      source,
+    )?;
   }
   for (position, count) in match_counts.into_iter().enumerate() {
     if count == 0 {
@@ -72,7 +134,222 @@ pub(crate) fn apply_overrides(
       ));
     }
   }
-  *rules = rendered_rules;
+  meter.reserve_render_work(projected_render_work, source)
+}
+
+fn reserve_override_selector_work(
+  rules: &[toml::Value],
+  overrides: &[OrderedOverride<'_>],
+  meter: &mut RenderMeter,
+  source: &str,
+) -> RenderResult<()> {
+  meter.reserve_selector_product(rules.len(), overrides.len(), source)?;
+  meter.reserve_selector_product(rules.len(), overrides.len(), source)?;
+  let total_rule_tags = rules.iter().try_fold(0usize, |total, rule| {
+    let tags = rule
+      .get("tags")
+      .and_then(toml::Value::as_array)
+      .map_or(0, Vec::len);
+    checked_add(total, tags, "selector work unit count", source)
+  })?;
+  let total_selector_tags = overrides.iter().try_fold(0usize, |total, ordered| {
+    checked_add(
+      total,
+      ordered.item.selector.tags.len(),
+      "selector work unit count",
+      source,
+    )
+  })?;
+  meter.reserve_selector_product(total_rule_tags, total_selector_tags, source)?;
+  meter.reserve_selector_product(total_rule_tags, total_selector_tags, source)
+}
+
+fn preflight_action_overrides(
+  rule: &toml::value::Table,
+  matches: &[usize],
+  overrides: &[OrderedOverride<'_>],
+  projections: &[ActionProjection],
+  source: &str,
+  meter: &mut RenderMeter,
+) -> RenderResult<usize> {
+  let action_overrides = matches
+    .iter()
+    .filter(|position| overrides[**position].item.action.is_some())
+    .copied()
+    .collect::<Vec<_>>();
+  if action_overrides.is_empty() {
+    return Ok(0);
+  }
+  if rule.get("path").is_some() {
+    let name = rule
+      .get("name")
+      .and_then(toml::Value::as_str)
+      .unwrap_or("<unknown>");
+    return fail(format!(
+      "{source} rule {name} uses path; action overrides require inline content"
+    ));
+  }
+  let Some(content) = rule.get("content").and_then(toml::Value::as_str) else {
+    return fail(format!(
+      "{source} action overrides require inline rule content"
+    ));
+  };
+  let value: toml::Value = toml::from_str(content).map_err(|error| {
+    crate::rulepack_render::RulepackRenderError::new(format!(
+      "failed to parse {source} rule content: {error}"
+    ))
+  })?;
+  let Some(actions) = value.get("actions").and_then(toml::Value::as_array) else {
+    return fail(format!(
+      "{source} action override found no [[actions]] entries"
+    ));
+  };
+  meter.reserve_selector_product(actions.len(), action_overrides.len(), source)?;
+  meter.reserve_selector_product(actions.len(), action_overrides.len(), source)?;
+
+  let mut projected = 0usize;
+  let mut current_content_bound =
+    crate::rulepack_render::serialization::estimate_value(&value, 0, source)?;
+  let mut action_field_bounds = vec![ActionFieldBounds::default(); actions.len()];
+  for position in action_overrides {
+    let override_item = overrides[position].item;
+    let action = override_item.action.as_ref().ok_or_else(|| {
+      crate::rulepack_render::RulepackRenderError::new(format!(
+        "{source} action override is missing action selector"
+      ))
+    })?;
+    let mut matching_actions = 0usize;
+    let mut matching_index = None;
+    for (index, action_value) in actions.iter().enumerate() {
+      let Some(table) = action_value.as_table() else {
+        return fail(format!("{source} action entries must be tables"));
+      };
+      if action_matches_selector(table, action) {
+        matching_actions += 1;
+        matching_index = Some(index);
+      }
+    }
+    if matching_actions != 1 {
+      return fail(format!(
+        "{source} action override for {} matched {matching_actions} actions; expected exactly one",
+        action.action_type
+      ));
+    }
+    projected = checked_add(
+      projected,
+      current_content_bound,
+      "projected override render byte count",
+      source,
+    )?;
+    let projection = projections[position];
+    projected = checked_add(
+      projected,
+      projection.replacement_bytes,
+      "projected override render byte count",
+      source,
+    )?;
+    let action_bounds = &mut action_field_bounds[matching_index.ok_or_else(|| {
+      crate::rulepack_render::RulepackRenderError::new(format!(
+        "{source} action override lost its validated action match"
+      ))
+    })?];
+    apply_field_growth(
+      &mut current_content_bound,
+      &mut action_bounds.rate,
+      projection.rate_growth,
+      source,
+    )?;
+    apply_field_growth(
+      &mut current_content_bound,
+      &mut action_bounds.body,
+      projection.body_growth,
+      source,
+    )?;
+    apply_field_growth(
+      &mut current_content_bound,
+      &mut action_bounds.burst,
+      projection.burst_growth,
+      source,
+    )?;
+    apply_field_growth(
+      &mut current_content_bound,
+      &mut action_bounds.status,
+      projection.status_growth,
+      source,
+    )?;
+    projected = checked_add(
+      projected,
+      current_content_bound,
+      "projected override render byte count",
+      source,
+    )?;
+  }
+  Ok(projected)
+}
+
+fn action_projection(
+  override_item: &RulepackOverride,
+  source: &str,
+) -> RenderResult<ActionProjection> {
+  if override_item.action.is_none() {
+    return Ok(ActionProjection::default());
+  }
+  let mut replacement_bytes = 0usize;
+  let mut string_projection = |value: &str| -> RenderResult<usize> {
+    replacement_bytes = checked_add(
+      replacement_bytes,
+      checked_add(
+        STRING_ALLOCATION_OVERHEAD,
+        value.len(),
+        "projected override render byte count",
+        source,
+      )?,
+      "projected override render byte count",
+      source,
+    )?;
+    checked_add(
+      crate::rulepack_render::serialization::encoded_string_bound(value, source)?,
+      16,
+      "projected override render byte count",
+      source,
+    )
+  };
+  let rate_growth = override_item
+    .rate
+    .as_deref()
+    .map(&mut string_projection)
+    .transpose()?
+    .unwrap_or(0);
+  let body_growth = override_item
+    .body
+    .as_deref()
+    .map(string_projection)
+    .transpose()?
+    .unwrap_or(0);
+  Ok(ActionProjection {
+    replacement_bytes,
+    rate_growth,
+    body_growth,
+    burst_growth: usize::from(override_item.burst.is_some()) * 32,
+    status_growth: usize::from(override_item.status.is_some()) * 32,
+  })
+}
+
+fn apply_field_growth(
+  content_bound: &mut usize,
+  current_field_bound: &mut usize,
+  next_field_bound: usize,
+  source: &str,
+) -> RenderResult<()> {
+  if next_field_bound > *current_field_bound {
+    *content_bound = checked_add(
+      *content_bound,
+      next_field_bound - *current_field_bound,
+      "projected override render byte count",
+      source,
+    )?;
+    *current_field_bound = next_field_bound;
+  }
   Ok(())
 }
 
@@ -394,4 +671,10 @@ fn scope_name(scope: OverrideScope) -> &'static str {
     OverrideScope::Manifest => "manifest",
     OverrideScope::Local => "local",
   }
+}
+
+fn checked_add(left: usize, right: usize, label: &str, source: &str) -> RenderResult<usize> {
+  left.checked_add(right).ok_or_else(|| {
+    crate::rulepack_render::RulepackRenderError::new(format!("{source} {label} overflow"))
+  })
 }

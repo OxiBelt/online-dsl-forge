@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use crate::parser::{BinaryOp, SourceSpan, UnaryOp};
@@ -19,7 +20,7 @@ pub(super) fn evaluate(
   let mut state = EvalState {
     limits,
     resource_limits,
-    processed_bytes: 0,
+    processed_bytes: Cell::new(0),
     steps: 0,
     program,
     locals: Vec::new(),
@@ -30,7 +31,7 @@ pub(super) fn evaluate(
 struct EvalState<'a> {
   limits: EvalLimits,
   resource_limits: RuntimeResourceLimits,
-  processed_bytes: usize,
+  processed_bytes: Cell<usize>,
   steps: usize,
   program: &'a VerifiedProgram,
   locals: Vec<BTreeMap<String, Value>>,
@@ -70,6 +71,12 @@ impl EvalState<'_> {
         self.eval_member(value, name, span)
       }
       VerifiedExprKindRef::FunctionCall { name, args } => {
+        if expression.capability_ticket().is_none() {
+          return Err(EvalError::new(
+            "runtime cannot execute an unresolved function capability",
+            span,
+          ));
+        }
         let args = self.eval_args(args, context, depth)?;
         let value = context
           .registry()
@@ -97,6 +104,12 @@ impl EvalState<'_> {
         name,
         args,
       } => {
+        if expression.capability_ticket().is_none() {
+          return Err(EvalError::new(
+            "runtime cannot execute an unresolved method capability",
+            span,
+          ));
+        }
         let receiver = self.eval(receiver, context, depth + 1)?;
         let args = self.eval_args(args, context, depth)?;
         let value =
@@ -352,21 +365,29 @@ impl EvalState<'_> {
   }
 
   fn charge(&mut self, metrics: ValueMetrics, span: SourceSpan) -> Result<(), EvalError> {
-    self.processed_bytes = self
+    let processed_bytes = self
       .processed_bytes
+      .get()
       .checked_add(metrics.bytes)
       .ok_or_else(|| EvalError::new("runtime value byte counter overflowed", span))?;
-    if self.processed_bytes > self.resource_limits.max_total_value_bytes {
+    if processed_bytes > self.resource_limits.max_total_value_bytes {
       Err(EvalError::new(
         "runtime cumulative value byte limit exceeded",
         span,
       ))
     } else {
+      self.processed_bytes.set(processed_bytes);
       Ok(())
     }
   }
 
   fn call_context(&self, span: SourceSpan) -> RuntimeCallContext<'_> {
-    RuntimeCallContext::new(self.program.profile(), self.program.regex_cache(), span)
+    RuntimeCallContext::new(
+      self.program.profile(),
+      self.program.regex_cache(),
+      &self.processed_bytes,
+      self.resource_limits.max_total_value_bytes,
+      span,
+    )
   }
 }

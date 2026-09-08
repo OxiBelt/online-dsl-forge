@@ -2,29 +2,30 @@ mod body_need;
 mod functions;
 mod limits;
 mod phase;
+mod regex;
 mod support;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::parser::preflight::preflight_ast;
+use crate::parser::validation::validate_ast_syntax;
 use crate::parser::{
   AstExpression, BinaryOp, Diagnostic, DiagnosticReport, ExprKind, SourceSpan, UnaryOp,
 };
 use crate::sema::dialect::ExpressionDialect;
 use crate::sema::profile::{
-  BodyNeedSummary, Determinism, RegexPolicy, SecurityProfile, SecurityProfileId,
+  BodyNeedSummary, Determinism, RegexAdmissionLimits, SecurityProfile, SecurityProfileId,
 };
 use crate::sema::schema::{
-  CapabilityMeta, CapabilityTicket, ExpressionFunctionScope, RuntimeSchema, SignatureMatch,
+  CapabilityMeta, CapabilityTicket, ExpressionFunctionScope, RegexFlavor, RuntimeSchema,
+  SignatureMatch,
 };
 use crate::sema::verified::{
   CompiledExpression, CompiledRegexCache, RegexLiteral, VerifiedExprKind, VerifiedExpression,
   VerifiedProgram, VerifiedProgramParts,
 };
-use support::{
-  ArgsAnalysis, ExprAnalysis, LocalBinding, ObjectOrigin, member_origin, string_literal,
-};
+use support::{ArgsAnalysis, ExprAnalysis, LocalBinding, ObjectOrigin, member_origin};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CompileOptions {
@@ -47,6 +48,7 @@ pub struct Analyzer {
   dialect: ExpressionDialect,
   expression_function_scope: ExpressionFunctionScope,
   expression_function_mode: ExpressionFunctionMode,
+  regex_limits: RegexAdmissionLimits,
 }
 
 impl Analyzer {
@@ -57,6 +59,7 @@ impl Analyzer {
       dialect: ExpressionDialect::default(),
       expression_function_scope: ExpressionFunctionScope::Local,
       expression_function_mode: ExpressionFunctionMode::default(),
+      regex_limits: RegexAdmissionLimits::default(),
     }
   }
 
@@ -80,21 +83,40 @@ impl Analyzer {
     self
   }
 
+  pub fn with_regex_admission_limits(mut self, limits: RegexAdmissionLimits) -> Self {
+    self.regex_limits = limits;
+    self
+  }
+
   pub fn analyze<'a>(
     &'a self,
     expression: &'a AstExpression,
     schema: &'a RuntimeSchema,
   ) -> Result<VerifiedProgram, DiagnosticReport> {
+    let schema_diagnostics = schema.validated_expression_function_diagnostics();
+    if !schema_diagnostics.is_empty() {
+      return Err(DiagnosticReport::new(schema_diagnostics));
+    }
     let max_depth = self.profile.max_call_depth.min(128).saturating_add(1);
     let mut preflight_diagnostics = Vec::new();
-    if let Err(report) = preflight_ast(expression, self.profile.max_ast_nodes, max_depth) {
-      preflight_diagnostics.extend(report.diagnostics);
+    match preflight_ast(expression, self.profile.max_ast_nodes, max_depth) {
+      Ok(_) => {
+        if let Err(report) = validate_ast_syntax(expression) {
+          preflight_diagnostics.extend(report.diagnostics);
+        }
+      }
+      Err(report) => preflight_diagnostics.extend(report.diagnostics),
     }
+    let diagnostic_limit = schema.expression_function_limits().max_diagnostics.max(1);
     for function in schema.expression_functions() {
+      if preflight_diagnostics.len() >= diagnostic_limit {
+        break;
+      }
       if let Err(report) =
         preflight_ast(&function.expression, self.profile.max_ast_nodes, max_depth)
       {
-        preflight_diagnostics.extend(report.diagnostics);
+        let remaining = diagnostic_limit - preflight_diagnostics.len();
+        preflight_diagnostics.extend(report.diagnostics.into_iter().take(remaining));
       }
     }
     if !preflight_diagnostics.is_empty() {
@@ -146,6 +168,10 @@ struct AnalyzeState<'a> {
   diagnostics: Vec<Diagnostic>,
   regex_literals: Vec<RegexLiteral>,
   regex_cache: CompiledRegexCache,
+  regex_attempts: BTreeMap<(RegexFlavor, String), Option<String>>,
+  regex_source_bytes: usize,
+  regex_count_limit_reported: bool,
+  regex_source_limit_reported: bool,
   required_capabilities: BTreeSet<CapabilityTicket>,
   required_capability_metadata: BTreeMap<CapabilityTicket, CapabilityMeta>,
   active_functions: Vec<(ExpressionFunctionScope, String)>,
@@ -166,6 +192,10 @@ impl<'a> AnalyzeState<'a> {
       diagnostics: Vec::new(),
       regex_literals: Vec::new(),
       regex_cache: CompiledRegexCache::default(),
+      regex_attempts: BTreeMap::new(),
+      regex_source_bytes: 0,
+      regex_count_limit_reported: false,
+      regex_source_limit_reported: false,
       required_capabilities: BTreeSet::new(),
       required_capability_metadata: BTreeMap::new(),
       active_functions: Vec::new(),
@@ -645,60 +675,6 @@ impl<'a> AnalyzeState<'a> {
           span,
         ));
         None
-      }
-    }
-  }
-
-  fn validate_regex_args(
-    &mut self,
-    capability: &CapabilityMeta,
-    args: &'a [AstExpression],
-    span: SourceSpan,
-  ) {
-    for regex_arg in &capability.regex_args {
-      let Some(arg) = args.get(regex_arg.index) else {
-        continue;
-      };
-      let arg = self.resolve_inline_argument(arg);
-      match self.analyzer.profile.default_regex_policy {
-        RegexPolicy::Forbid => self.diagnostics.push(Diagnostic::new(
-          "regex arguments are forbidden by profile",
-          span,
-        )),
-        RegexPolicy::LiteralOnlyPrecompiled => {
-          let Some(pattern) = string_literal(arg) else {
-            self.diagnostics.push(Diagnostic::new(
-              "regex argument must be a string literal",
-              arg.span,
-            ));
-            continue;
-          };
-          let literal = RegexLiteral {
-            pattern,
-            flavor: regex_arg.flavor,
-            span: arg.span,
-          };
-          if let Err(error) = self.regex_cache.insert(&literal) {
-            self.diagnostics.push(Diagnostic::new(
-              format!("invalid regex pattern: {error}"),
-              arg.span,
-            ));
-          } else {
-            self.regex_literals.push(literal);
-          }
-        }
-        RegexPolicy::DynamicWithBudget => {
-          if let Some(pattern) = string_literal(arg) {
-            let literal = RegexLiteral {
-              pattern,
-              flavor: regex_arg.flavor,
-              span: arg.span,
-            };
-            if self.regex_cache.insert(&literal).is_ok() {
-              self.regex_literals.push(literal);
-            }
-          }
-        }
       }
     }
   }

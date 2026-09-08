@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 
 use crate::parser::SourceSpan;
 use crate::sema::{BodyAccess, CapabilityMeta};
 use crate::value::Value;
 
-use super::{DynamicRegistry, EvalError};
+use super::{DynamicRegistry, EvalError, RuntimeCallContext};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum RuntimePatternSetKind {
@@ -52,6 +52,9 @@ pub struct RuntimePatternSetLimits {
   pub max_sets: usize,
   pub max_patterns_per_set: usize,
   pub max_pattern_bytes: usize,
+  pub max_total_pattern_bytes: usize,
+  pub max_compiled_regex_bytes: usize,
+  pub max_total_compiled_regex_bytes: usize,
 }
 
 impl Default for RuntimePatternSetLimits {
@@ -60,6 +63,9 @@ impl Default for RuntimePatternSetLimits {
       max_sets: 256,
       max_patterns_per_set: 1024,
       max_pattern_bytes: 4096,
+      max_total_pattern_bytes: 64 * 1024 * 1024,
+      max_compiled_regex_bytes: 256 * 1024,
+      max_total_compiled_regex_bytes: 64 * 1024 * 1024,
     }
   }
 }
@@ -80,22 +86,55 @@ impl RuntimePatternSets {
     configs: impl IntoIterator<Item = RuntimePatternSetConfig>,
     limits: RuntimePatternSetLimits,
   ) -> Result<Self, RuntimePatternSetError> {
-    let mut sets = BTreeMap::new();
+    let mut admitted = BTreeMap::new();
+    let mut total_pattern_bytes = 0usize;
+    let mut total_regex_patterns = 0usize;
     for config in configs {
-      if sets.len() >= limits.max_sets {
+      if admitted.len() >= limits.max_sets {
         return Err(RuntimePatternSetError::new(
           "runtime pattern set limit exceeded",
         ));
       }
-      validate_config(&config, limits)?;
-      if sets.contains_key(&config.name) {
+      let metrics = validate_config(&config, limits)?;
+      if admitted.contains_key(&config.name) {
         return Err(RuntimePatternSetError::new(format!(
           "duplicate runtime pattern set {}",
           config.name
         )));
       }
-      let compiled = CompiledRuntimePatternSet::compile(&config)?;
-      sets.insert(config.name, compiled);
+      total_pattern_bytes = total_pattern_bytes
+        .checked_add(metrics.source_bytes)
+        .ok_or_else(|| {
+          RuntimePatternSetError::new("runtime pattern source byte count overflowed")
+        })?;
+      if total_pattern_bytes > limits.max_total_pattern_bytes {
+        return Err(RuntimePatternSetError::new(
+          "runtime pattern sets exceed max_total_pattern_bytes",
+        ));
+      }
+      total_regex_patterns = total_regex_patterns
+        .checked_add(metrics.regex_patterns)
+        .ok_or_else(|| RuntimePatternSetError::new("runtime regex pattern count overflowed"))?;
+      admitted.insert(config.name.clone(), (config, metrics));
+    }
+
+    let projected_compiled_regex_bytes = total_regex_patterns
+      .checked_mul(limits.max_compiled_regex_bytes)
+      .ok_or_else(|| RuntimePatternSetError::new("runtime compiled regex byte count overflowed"))?;
+    if projected_compiled_regex_bytes > limits.max_total_compiled_regex_bytes {
+      return Err(RuntimePatternSetError::new(
+        "runtime pattern sets exceed max_total_compiled_regex_bytes",
+      ));
+    }
+
+    let mut sets = BTreeMap::new();
+    for (name, (config, metrics)) in admitted {
+      let compiled = CompiledRuntimePatternSet::compile(
+        &config,
+        metrics.match_complexity,
+        limits.max_compiled_regex_bytes,
+      )?;
+      sets.insert(name, compiled);
     }
     Ok(Self { sets })
   }
@@ -130,6 +169,52 @@ impl RuntimePatternSets {
       )),
     }
   }
+
+  fn projected_match_work(
+    &self,
+    name: &str,
+    receiver: &Value,
+    span: SourceSpan,
+  ) -> Result<usize, EvalError> {
+    let Some(set) = self.sets.get(name) else {
+      return Err(EvalError::new(
+        format!("unknown runtime pattern set {name}"),
+        span,
+      ));
+    };
+    let mut candidate_bytes = 0usize;
+    match receiver {
+      Value::String(value) => candidate_bytes = value.len().saturating_add(1),
+      Value::Array(values) => {
+        for value in values {
+          let Value::String(value) = value else {
+            return Err(EvalError::new(
+              format!(
+                "pattern-set methods require string array items, got {}",
+                value.type_name()
+              ),
+              span,
+            ));
+          };
+          candidate_bytes = candidate_bytes
+            .checked_add(value.len().saturating_add(1))
+            .ok_or_else(|| EvalError::new("pattern-set work counter overflowed", span))?;
+        }
+      }
+      other => {
+        return Err(EvalError::new(
+          format!(
+            "pattern-set methods require string or array receiver, got {}",
+            other.type_name()
+          ),
+          span,
+        ));
+      }
+    }
+    candidate_bytes
+      .checked_mul(set.match_complexity())
+      .ok_or_else(|| EvalError::new("pattern-set work counter overflowed", span))
+  }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -159,36 +244,74 @@ impl Error for RuntimePatternSetError {}
 
 #[derive(Debug, Clone)]
 enum CompiledRuntimePatternSet {
-  Contains(Vec<String>),
-  Regex(Vec<Regex>),
+  Contains {
+    patterns: Vec<String>,
+    match_complexity: usize,
+  },
+  Regex {
+    patterns: Vec<Regex>,
+    match_complexity: usize,
+  },
 }
 
 impl CompiledRuntimePatternSet {
-  fn compile(config: &RuntimePatternSetConfig) -> Result<Self, RuntimePatternSetError> {
+  fn compile(
+    config: &RuntimePatternSetConfig,
+    match_complexity: usize,
+    max_compiled_regex_bytes: usize,
+  ) -> Result<Self, RuntimePatternSetError> {
     match config.kind {
-      RuntimePatternSetKind::Contains => Ok(Self::Contains(config.patterns.clone())),
-      RuntimePatternSetKind::Regex => config
-        .patterns
-        .iter()
-        .map(|pattern| {
-          Regex::new(pattern).map_err(|error| {
-            RuntimePatternSetError::new(format!(
-              "runtime pattern set {} contains invalid regex pattern: {error}",
-              config.name
-            ))
+      RuntimePatternSetKind::Contains => Ok(Self::Contains {
+        patterns: config.patterns.clone(),
+        match_complexity,
+      }),
+      RuntimePatternSetKind::Regex => {
+        let patterns = config
+          .patterns
+          .iter()
+          .map(|pattern| {
+            let mut builder = RegexBuilder::new(pattern);
+            builder.size_limit(max_compiled_regex_bytes);
+            builder.build().map_err(|error| {
+              RuntimePatternSetError::new(format!(
+                "runtime pattern set {} contains invalid regex pattern: {error}",
+                config.name
+              ))
+            })
           })
+          .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::Regex {
+          patterns,
+          match_complexity,
         })
-        .collect::<Result<Vec<_>, _>>()
-        .map(Self::Regex),
+      }
     }
   }
 
   fn is_match(&self, text: &str) -> bool {
     match self {
-      Self::Contains(patterns) => patterns.iter().any(|pattern| text.contains(pattern)),
-      Self::Regex(patterns) => patterns.iter().any(|pattern| pattern.is_match(text)),
+      Self::Contains { patterns, .. } => patterns.iter().any(|pattern| text.contains(pattern)),
+      Self::Regex { patterns, .. } => patterns.iter().any(|pattern| pattern.is_match(text)),
     }
   }
+
+  fn match_complexity(&self) -> usize {
+    match self {
+      Self::Contains {
+        match_complexity, ..
+      }
+      | Self::Regex {
+        match_complexity, ..
+      } => *match_complexity,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct PatternSetMetrics {
+  source_bytes: usize,
+  match_complexity: usize,
+  regex_patterns: usize,
 }
 
 pub fn register_oxirule_pattern_set_methods(
@@ -199,13 +322,13 @@ pub fn register_oxirule_pattern_set_methods(
   registry.register_method_capability_with_context(
     CapabilityMeta::method("containsAny", 1).with_body_access(BodyAccess::PrefixBytes),
     move |context, receiver, args| {
-      evaluate_pattern_set_method(&contains_sets, context.span(), receiver, args)
+      evaluate_pattern_set_method(&contains_sets, context, receiver, args)
     },
   );
   registry.register_method_capability_with_context(
     CapabilityMeta::method("matchesAny", 1).with_body_access(BodyAccess::PrefixBytes),
     move |context, receiver, args| {
-      evaluate_pattern_set_method(&pattern_sets, context.span(), receiver, args)
+      evaluate_pattern_set_method(&pattern_sets, context, receiver, args)
     },
   );
   registry
@@ -220,7 +343,7 @@ pub fn oxirule_pattern_set_registry(pattern_sets: RuntimePatternSets) -> Dynamic
 fn validate_config(
   config: &RuntimePatternSetConfig,
   limits: RuntimePatternSetLimits,
-) -> Result<(), RuntimePatternSetError> {
+) -> Result<PatternSetMetrics, RuntimePatternSetError> {
   if config.name.trim().is_empty() {
     return Err(RuntimePatternSetError::new(
       "runtime pattern set name must not be empty",
@@ -232,6 +355,8 @@ fn validate_config(
       config.name
     )));
   }
+  let mut source_bytes = 0usize;
+  let mut match_complexity = 0usize;
   for pattern in &config.patterns {
     if pattern.len() > limits.max_pattern_bytes {
       return Err(RuntimePatternSetError::new(format!(
@@ -239,17 +364,35 @@ fn validate_config(
         config.name
       )));
     }
+    source_bytes = source_bytes
+      .checked_add(pattern.len())
+      .ok_or_else(|| RuntimePatternSetError::new("runtime pattern source byte count overflowed"))?;
+    match_complexity = match_complexity
+      .checked_add(pattern.len())
+      .and_then(|total| total.checked_add(1))
+      .ok_or_else(|| RuntimePatternSetError::new("runtime pattern complexity overflowed"))?;
   }
-  Ok(())
+  Ok(PatternSetMetrics {
+    source_bytes,
+    match_complexity,
+    regex_patterns: if config.kind == RuntimePatternSetKind::Regex {
+      config.patterns.len()
+    } else {
+      0
+    },
+  })
 }
 
 fn evaluate_pattern_set_method(
   pattern_sets: &RuntimePatternSets,
-  span: SourceSpan,
+  context: RuntimeCallContext<'_>,
   receiver: &Value,
   args: &[Value],
 ) -> Result<Value, EvalError> {
+  let span = context.span();
   let pattern_set = expect_pattern_set_name(args, span)?;
+  let work = pattern_sets.projected_match_work(pattern_set, receiver, span)?;
+  context.charge_work(work)?;
   pattern_sets
     .is_match(pattern_set, receiver, span)
     .map(Value::Bool)

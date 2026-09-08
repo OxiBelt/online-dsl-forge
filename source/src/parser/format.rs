@@ -2,6 +2,7 @@ use super::ast::{AstExpression, BinaryOp, ExprKind};
 use super::diagnostics::DiagnosticReport;
 use super::limits::AstFormatLimits;
 use super::preflight::preflight_ast;
+use super::validation::validate_ast_syntax;
 
 pub fn format_expression(expression: &AstExpression) -> String {
   format_expression_with_limits(expression, AstFormatLimits::default()).unwrap_or_default()
@@ -19,6 +20,7 @@ pub fn format_expression_with_limits(
       report
     }
   })?;
+  validate_ast_syntax(expression)?;
 
   let mut formatter = Formatter {
     output: String::new(),

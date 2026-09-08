@@ -8,6 +8,7 @@ mod limits;
 mod parse;
 pub(crate) mod preflight;
 pub mod span;
+pub(crate) mod validation;
 
 pub use self::ast::{AstExpression, BinaryOp, ExprKind, UnaryOp};
 pub use self::diagnostics::{Diagnostic, DiagnosticReport};

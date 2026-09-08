@@ -1,7 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::parser::{AstExpression, Diagnostic, ExprKind, SourceSpan};
-use crate::sema::schema::{ExpressionFunction, ExpressionFunctionScope, SignatureMatch};
+use crate::sema::schema::{
+  DIAGNOSTIC_BUDGET_EXCEEDED, ExpressionFunction, ExpressionFunctionScope, SignatureMatch,
+  bounded_diagnostic_message, diagnostic_name, expression_function_diagnostic_byte_limit,
+  expression_function_diagnostic_limit,
+};
 use crate::sema::verified::{VerifiedExprKind, VerifiedExpression};
 
 use super::support::{ExprAnalysis, LocalBinding, function_calls};
@@ -51,16 +55,18 @@ impl<'a> AnalyzeState<'a> {
   }
 
   pub(super) fn validate_function_graph(&mut self) {
-    for diagnostic in self.schema.expression_function_diagnostics() {
-      self.diagnostics.push(diagnostic.diagnostic());
-    }
-
     for function in self.schema.expression_functions() {
+      if self.function_diagnostic_limit_reached() {
+        break;
+      }
+      let mut diagnostics = Vec::new();
       self
         .analyzer
         .dialect
-        .validate(&function.expression, &mut self.diagnostics);
-      self.validate_function_signature(function);
+        .validate(&function.expression, &mut diagnostics);
+      for diagnostic in diagnostics {
+        self.push_function_diagnostic(diagnostic);
+      }
     }
 
     self.validate_function_cycles();
@@ -78,10 +84,10 @@ impl<'a> AnalyzeState<'a> {
     }
 
     if function.params.len() != args.len() {
-      self.diagnostics.push(Diagnostic::new(
+      self.push_function_diagnostic(Diagnostic::new(
         format!(
           "function {} does not accept {} arguments",
-          function.name,
+          diagnostic_name(&function.name),
           args.len()
         ),
         span,
@@ -100,8 +106,11 @@ impl<'a> AnalyzeState<'a> {
 
     let key = function_key(function);
     if self.active_functions.contains(&key) {
-      self.diagnostics.push(Diagnostic::new(
-        format!("recursive expression function {}", function.name),
+      self.push_function_diagnostic(Diagnostic::new(
+        format!(
+          "recursive expression function {}",
+          diagnostic_name(&function.name)
+        ),
         span,
       ));
       return ExprAnalysis::leaf(VerifiedExpression::new(VerifiedExprKind::Null, span), None);
@@ -125,10 +134,10 @@ impl<'a> AnalyzeState<'a> {
     depth: usize,
   ) -> ExprAnalysis {
     if function.params.len() != args.len() {
-      self.diagnostics.push(Diagnostic::new(
+      self.push_function_diagnostic(Diagnostic::new(
         format!(
           "function {} does not accept {} arguments",
-          function.name,
+          diagnostic_name(&function.name),
           args.len()
         ),
         span,
@@ -157,8 +166,11 @@ impl<'a> AnalyzeState<'a> {
 
     let key = function_key(function);
     if self.active_functions.contains(&key) {
-      self.diagnostics.push(Diagnostic::new(
-        format!("recursive expression function {}", function.name),
+      self.push_function_diagnostic(Diagnostic::new(
+        format!(
+          "recursive expression function {}",
+          diagnostic_name(&function.name)
+        ),
         span,
       ));
       return ExprAnalysis::leaf(VerifiedExpression::new(VerifiedExprKind::Null, span), None);
@@ -207,37 +219,6 @@ impl<'a> AnalyzeState<'a> {
     .with_mitigation_payload(args_analysis.mitigation_payload || body.mitigation_payload)
   }
 
-  fn validate_function_signature(&mut self, function: &ExpressionFunction) {
-    if !valid_oxirule_identifier(&function.name) || is_top_level_oxirule_object(&function.name) {
-      self.diagnostics.push(Diagnostic::new(
-        format!("function name {} must be a valid identifier", function.name),
-        function.expression.span,
-      ));
-    }
-
-    let mut params = HashSet::new();
-    for param in &function.params {
-      if !valid_oxirule_identifier(param) || is_top_level_oxirule_object(param) {
-        self.diagnostics.push(Diagnostic::new(
-          format!(
-            "function {} parameter {param} must be a valid identifier",
-            function.name
-          ),
-          function.expression.span,
-        ));
-      }
-      if !params.insert(param.as_str()) {
-        self.diagnostics.push(Diagnostic::new(
-          format!(
-            "function {} contains duplicate parameter {param}",
-            function.name
-          ),
-          function.expression.span,
-        ));
-      }
-    }
-  }
-
   fn validate_function_cycles(&mut self) {
     let functions = self
       .schema
@@ -256,10 +237,11 @@ impl<'a> AnalyzeState<'a> {
           continue;
         };
         if callee.params.len() != call.arity {
-          self.diagnostics.push(Diagnostic::new(
+          self.push_function_diagnostic(Diagnostic::new(
             format!(
               "function {} does not accept {} arguments",
-              call.name, call.arity
+              diagnostic_name(&call.name),
+              call.arity
             ),
             call.span,
           ));
@@ -287,8 +269,11 @@ impl<'a> AnalyzeState<'a> {
         }
         if !active.insert(key.clone()) {
           if let Some(function) = functions.get(&key) {
-            self.diagnostics.push(Diagnostic::new(
-              format!("recursive expression function {}", function.name),
+            self.push_function_diagnostic(Diagnostic::new(
+              format!(
+                "recursive expression function {}",
+                diagnostic_name(&function.name)
+              ),
               function.expression.span,
             ));
           }
@@ -299,8 +284,11 @@ impl<'a> AnalyzeState<'a> {
           for edge in edges.iter().rev() {
             if active.contains(edge) {
               if let Some(function) = functions.get(edge) {
-                self.diagnostics.push(Diagnostic::new(
-                  format!("recursive expression function {}", function.name),
+                self.push_function_diagnostic(Diagnostic::new(
+                  format!(
+                    "recursive expression function {}",
+                    diagnostic_name(&function.name)
+                  ),
                   function.expression.span,
                 ));
               }
@@ -317,60 +305,48 @@ impl<'a> AnalyzeState<'a> {
     match self.schema.function_accepts(name, arity) {
       SignatureMatch::Matches => {}
       SignatureMatch::Unknown if self.analyzer.options.allow_unknown_functions => {}
-      SignatureMatch::Unknown => self
-        .diagnostics
-        .push(Diagnostic::new(format!("unknown function {name}"), span)),
-      SignatureMatch::ArityMismatch => self.diagnostics.push(Diagnostic::new(
-        format!("function {name} does not accept {arity} arguments"),
+      SignatureMatch::Unknown => {
+        self.push_function_diagnostic(Diagnostic::new(
+          format!("unknown function {}", diagnostic_name(name)),
+          span,
+        ));
+      }
+      SignatureMatch::ArityMismatch => self.push_function_diagnostic(Diagnostic::new(
+        format!(
+          "function {} does not accept {arity} arguments",
+          diagnostic_name(name)
+        ),
         span,
       )),
     }
+  }
+
+  fn push_function_diagnostic(&mut self, diagnostic: Diagnostic) {
+    let limits = self.schema.expression_function_limits();
+    let message = bounded_diagnostic_message(&diagnostic.message);
+    let retained_bytes = self.diagnostics.iter().try_fold(0usize, |total, existing| {
+      total.checked_add(existing.message.len())
+    });
+    let fits = retained_bytes
+      .and_then(|total| total.checked_add(message.len()))
+      .is_some_and(|total| total <= expression_function_diagnostic_byte_limit(limits));
+    if self.diagnostics.len() < expression_function_diagnostic_limit(limits) && fits {
+      self
+        .diagnostics
+        .push(Diagnostic::new(message, diagnostic.span));
+    } else if self.diagnostics.is_empty() {
+      self
+        .diagnostics
+        .push(Diagnostic::new(DIAGNOSTIC_BUDGET_EXCEEDED, diagnostic.span));
+    }
+  }
+
+  fn function_diagnostic_limit_reached(&self) -> bool {
+    self.diagnostics.len()
+      >= expression_function_diagnostic_limit(self.schema.expression_function_limits()).max(1)
   }
 }
 
 fn function_key(function: &ExpressionFunction) -> FunctionKey {
   (function.scope, function.name.clone())
-}
-
-fn valid_oxirule_identifier(identifier: &str) -> bool {
-  let mut chars = identifier.chars();
-  let Some(first) = chars.next() else {
-    return false;
-  };
-  (first.is_ascii_alphabetic() || first == '_')
-    && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    && !is_reserved_identifier(identifier)
-}
-
-fn is_reserved_identifier(identifier: &str) -> bool {
-  matches!(
-    identifier,
-    "if"
-      | "else"
-      | "for"
-      | "while"
-      | "do"
-      | "switch"
-      | "let"
-      | "const"
-      | "function"
-      | "import"
-      | "export"
-      | "new"
-      | "try"
-      | "catch"
-      | "throw"
-      | "await"
-      | "return"
-      | "true"
-      | "false"
-      | "null"
-  )
-}
-
-fn is_top_level_oxirule_object(identifier: &str) -> bool {
-  matches!(
-    identifier,
-    "Context" | "Request" | "DynamicPolicy" | "Response" | "Stream"
-  )
 }

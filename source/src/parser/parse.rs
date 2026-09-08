@@ -3,6 +3,7 @@ use super::diagnostics::{Diagnostic, DiagnosticReport};
 use super::lexer::{Token, TokenKind, tokenize_with_limits};
 use super::limits::ParseLimits;
 use super::span::SourceSpan;
+use super::validation::is_reserved_identifier;
 
 const MAX_PARSE_RECURSION_DEPTH: usize = 256;
 // `serde_json` rejects the 128th nested container by default. Keep every AST
@@ -555,32 +556,6 @@ fn validate_identifier(identifier: &str, span: SourceSpan) -> Result<(), Diagnos
   } else {
     Ok(())
   }
-}
-
-fn is_reserved_identifier(identifier: &str) -> bool {
-  matches!(
-    identifier,
-    "if"
-      | "else"
-      | "for"
-      | "while"
-      | "do"
-      | "switch"
-      | "let"
-      | "const"
-      | "function"
-      | "import"
-      | "export"
-      | "new"
-      | "try"
-      | "catch"
-      | "throw"
-      | "await"
-      | "return"
-      | "true"
-      | "false"
-      | "null"
-  )
 }
 
 #[cfg(test)]

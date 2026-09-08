@@ -8,7 +8,13 @@ pub struct RulepackRenderLimits {
   pub max_variable_value_bytes: usize,
   pub max_total_variable_bytes: usize,
   pub max_variables: usize,
+  pub max_profile_assignments: usize,
   pub max_rulepack_files: usize,
+  pub max_overrides: usize,
+  pub max_exceptions: usize,
+  pub max_selector_work: usize,
+  pub max_local_option_bytes: usize,
+  pub max_override_body_bytes: usize,
   pub max_placeholders: usize,
   pub max_total_input_bytes: usize,
   pub max_total_output_bytes: usize,
@@ -22,7 +28,13 @@ impl Default for RulepackRenderLimits {
       max_variable_value_bytes: 1024 * 1024,
       max_total_variable_bytes: 8 * 1024 * 1024,
       max_variables: 4096,
+      max_profile_assignments: 262_144,
       max_rulepack_files: 4096,
+      max_overrides: 4096,
+      max_exceptions: 4096,
+      max_selector_work: 16 * 1024 * 1024,
+      max_local_option_bytes: 16 * 1024 * 1024,
+      max_override_body_bytes: 8 * 1024 * 1024,
       max_placeholders: 262_144,
       max_total_input_bytes: 64 * 1024 * 1024,
       max_total_output_bytes: 64 * 1024 * 1024,
@@ -36,6 +48,7 @@ pub(crate) struct RenderMeter {
   output_bytes: usize,
   render_work_bytes: usize,
   placeholder_count: usize,
+  selector_work: usize,
 }
 
 impl RenderMeter {
@@ -46,6 +59,7 @@ impl RenderMeter {
       output_bytes: 0,
       render_work_bytes: 0,
       placeholder_count: 0,
+      selector_work: 0,
     }
   }
 
@@ -148,6 +162,71 @@ impl RenderMeter {
       "rulepack files",
       source,
     )
+  }
+
+  pub(crate) fn profile_assignments(&self, count: usize, source: &str) -> RenderResult<()> {
+    check_limit(
+      count,
+      self.limits.max_profile_assignments,
+      "profile assignments",
+      source,
+    )
+  }
+
+  pub(crate) fn overrides(&self, count: usize, source: &str) -> RenderResult<()> {
+    check_limit(count, self.limits.max_overrides, "overrides", source)
+  }
+
+  pub(crate) fn exceptions(&self, count: usize, source: &str) -> RenderResult<()> {
+    check_limit(count, self.limits.max_exceptions, "exceptions", source)
+  }
+
+  pub(crate) fn local_options(&mut self, bytes: usize, source: &str) -> RenderResult<()> {
+    check_limit(
+      bytes,
+      self.limits.max_local_option_bytes,
+      "local option bytes",
+      source,
+    )?;
+    self.add_input(bytes, source)
+  }
+
+  pub(crate) fn override_body(&self, bytes: usize, source: &str) -> RenderResult<()> {
+    check_limit(
+      bytes,
+      self.limits.max_override_body_bytes,
+      "override body bytes",
+      source,
+    )
+  }
+
+  pub(crate) fn reserve_selector_work(&mut self, units: usize, source: &str) -> RenderResult<()> {
+    self.selector_work = checked_add(
+      self.selector_work,
+      units,
+      "selector work unit count",
+      source,
+    )?;
+    check_limit(
+      self.selector_work,
+      self.limits.max_selector_work,
+      "selector work units",
+      source,
+    )
+  }
+
+  pub(crate) fn reserve_selector_product(
+    &mut self,
+    left: usize,
+    right: usize,
+    source: &str,
+  ) -> RenderResult<()> {
+    let units = left.checked_mul(right).ok_or_else(|| {
+      crate::rulepack_render::RulepackRenderError::new(format!(
+        "{source} selector work unit count overflow"
+      ))
+    })?;
+    self.reserve_selector_work(units, source)
   }
 
   pub(crate) fn placeholder(&mut self, source: &str) -> RenderResult<()> {

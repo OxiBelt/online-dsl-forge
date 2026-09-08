@@ -57,6 +57,47 @@ pub(crate) fn preflight_ast(
   })
 }
 
+pub(crate) fn drain_ast_iteratively(expression: AstExpression) {
+  let mut pending = vec![AstDrainWork::Expression(expression)];
+  while let Some(work) = pending.pop() {
+    match work {
+      AstDrainWork::Expression(AstExpression { kind, .. }) => match kind {
+        ExprKind::Array { items } | ExprKind::FunctionCall { args: items, .. } => {
+          pending.push(AstDrainWork::Expressions(items.into_iter()));
+        }
+        ExprKind::Member { receiver, .. } | ExprKind::Unary { expr: receiver, .. } => {
+          pending.push(AstDrainWork::Expression(*receiver));
+        }
+        ExprKind::MethodCall { receiver, args, .. } => {
+          pending.push(AstDrainWork::Expressions(args.into_iter()));
+          pending.push(AstDrainWork::Expression(*receiver));
+        }
+        ExprKind::Binary { left, right, .. } => {
+          pending.push(AstDrainWork::Expression(*left));
+          pending.push(AstDrainWork::Expression(*right));
+        }
+        ExprKind::Null
+        | ExprKind::Bool { .. }
+        | ExprKind::Int { .. }
+        | ExprKind::Float { .. }
+        | ExprKind::String { .. }
+        | ExprKind::Identifier { .. } => {}
+      },
+      AstDrainWork::Expressions(mut expressions) => {
+        if let Some(expression) = expressions.next() {
+          pending.push(AstDrainWork::Expressions(expressions));
+          pending.push(AstDrainWork::Expression(expression));
+        }
+      }
+    }
+  }
+}
+
+enum AstDrainWork {
+  Expression(AstExpression),
+  Expressions(std::vec::IntoIter<AstExpression>),
+}
+
 fn child_count(expression: &AstExpression) -> usize {
   match &expression.kind {
     ExprKind::Array { items } | ExprKind::FunctionCall { args: items, .. } => items.len(),

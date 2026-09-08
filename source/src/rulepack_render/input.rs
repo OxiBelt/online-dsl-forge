@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::rulepack_render::error::{RenderResult, fail};
 use crate::rulepack_render::types::{
@@ -40,7 +40,7 @@ pub(crate) fn validate_rulepack_inputs(
   bindings: &[RulepackBinding],
   profiles: &[RulepackProfile],
 ) -> RenderResult<()> {
-  let mut variable_names = HashSet::new();
+  let mut variables_by_name = HashMap::with_capacity(variables.len());
   for variable in variables {
     validate_label(source, "variables.name", &variable.name)?;
     validate_variable_type(source, variable)?;
@@ -53,7 +53,10 @@ pub(crate) fn validate_rulepack_inputs(
     if let Some(default) = &variable.default {
       validate_variable_value(source, variable, default)?;
     }
-    if !variable_names.insert(variable.name.clone()) {
+    if variables_by_name
+      .insert(variable.name.as_str(), variable)
+      .is_some()
+    {
       return fail(format!(
         "{source} contains duplicate variable {}",
         variable.name
@@ -66,7 +69,7 @@ pub(crate) fn validate_rulepack_inputs(
   for binding in bindings {
     validate_label(source, "bindings.name", &binding.name)?;
     validate_label(source, "bindings.bind_as", &binding.bind_as)?;
-    if variable_names.contains(&binding.bind_as) {
+    if variables_by_name.contains_key(binding.bind_as.as_str()) {
       return fail(format!(
         "{source} binding {} bind_as {} conflicts with a declared variable; route and other environment objects must use [[bindings]], while [[variables]] is only for scalar values",
         binding.name, binding.bind_as
@@ -84,7 +87,7 @@ pub(crate) fn validate_rulepack_inputs(
         binding.name
       ));
     }
-    if variable_names.contains(&binding.name) {
+    if variables_by_name.contains_key(binding.name.as_str()) {
       return fail(format!(
         "{source} binding {} conflicts with a declared variable; use distinct names for bind and var inputs",
         binding.name
@@ -109,7 +112,7 @@ pub(crate) fn validate_rulepack_inputs(
       ));
     }
     for (name, value) in &profile.values {
-      let Some(variable) = variables.iter().find(|variable| variable.name == *name) else {
+      let Some(variable) = variables_by_name.get(name.as_str()) else {
         return fail(format!(
           "{source} profile {} sets unknown variable {name}",
           profile.name

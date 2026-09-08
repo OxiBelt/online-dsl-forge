@@ -274,6 +274,17 @@ pub struct CompiledRegexCache {
 
 impl CompiledRegexCache {
   pub fn insert(&mut self, literal: &RegexLiteral) -> Result<(), regex::Error> {
+    self.insert_with_size_limit(
+      literal,
+      crate::sema::profile::RegexAdmissionLimits::default().max_compiled_regex_bytes,
+    )
+  }
+
+  pub(crate) fn insert_with_size_limit(
+    &mut self,
+    literal: &RegexLiteral,
+    size_limit: usize,
+  ) -> Result<(), regex::Error> {
     let target = match literal.flavor {
       RegexFlavor::Default => &mut self.default,
       RegexFlavor::HeaderName => &mut self.header_name,
@@ -281,10 +292,14 @@ impl CompiledRegexCache {
     if target.contains_key(&literal.pattern) {
       return Ok(());
     }
-    target.insert(literal.pattern.clone(), compile_regex(literal)?);
+    target.insert(literal.pattern.clone(), compile_regex(literal, size_limit)?);
     Ok(())
   }
 
+  /// Borrow a regex retained in this verification artifact.
+  ///
+  /// Runtime handlers should obtain regexes from `RuntimeCallContext` so work
+  /// can be charged to the active evaluation.
   pub fn get(&self, flavor: RegexFlavor, pattern: &str) -> Option<&Regex> {
     match flavor {
       RegexFlavor::Default => self.default.get(pattern),
@@ -292,6 +307,10 @@ impl CompiledRegexCache {
     }
   }
 
+  /// Match outside runtime evaluation for inspection or host-managed work.
+  ///
+  /// This helper has no evaluation budget. Runtime handlers should use
+  /// `RuntimeCallContext::precompiled_regex_is_match` instead.
   pub fn is_match(&self, flavor: RegexFlavor, pattern: &str, haystack: &str) -> Option<bool> {
     self
       .get(flavor, pattern)
@@ -307,11 +326,11 @@ impl CompiledRegexCache {
   }
 }
 
-fn compile_regex(literal: &RegexLiteral) -> Result<Regex, regex::Error> {
-  match literal.flavor {
-    RegexFlavor::Default => Regex::new(&literal.pattern),
-    RegexFlavor::HeaderName => RegexBuilder::new(&literal.pattern)
-      .case_insensitive(true)
-      .build(),
+fn compile_regex(literal: &RegexLiteral, size_limit: usize) -> Result<Regex, regex::Error> {
+  let mut builder = RegexBuilder::new(&literal.pattern);
+  builder.size_limit(size_limit);
+  if literal.flavor == RegexFlavor::HeaderName {
+    builder.case_insensitive(true);
   }
+  builder.build()
 }

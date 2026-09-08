@@ -9,13 +9,41 @@ pub(crate) fn reserve_toml_serialization(
   source: &str,
   includes_value_clone: bool,
 ) -> RenderResult<()> {
-  let estimate = estimate_value(value, 0, source)?;
+  reserve_serialization_estimate(
+    estimate_value(value, 0, source)?,
+    meter,
+    source,
+    includes_value_clone,
+  )
+}
+
+pub(crate) fn reserve_projected_toml_serialization(
+  value: &toml::Value,
+  projected_growth: usize,
+  meter: &mut RenderMeter,
+  source: &str,
+  includes_value_clone: bool,
+) -> RenderResult<()> {
+  let estimate = checked_add(estimate_value(value, 0, source)?, projected_growth, source)?;
+  reserve_serialization_estimate(estimate, meter, source, includes_value_clone)
+}
+
+fn reserve_serialization_estimate(
+  estimate: usize,
+  meter: &mut RenderMeter,
+  source: &str,
+  includes_value_clone: bool,
+) -> RenderResult<()> {
   let multiplier = SERIALIZER_WORK_MULTIPLIER + usize::from(includes_value_clone);
   let work = checked_mul(estimate, multiplier, source)?;
   meter.reserve_render_work(work, source)
 }
 
-fn estimate_value(value: &toml::Value, depth: usize, source: &str) -> RenderResult<usize> {
+pub(crate) fn estimate_value(
+  value: &toml::Value,
+  depth: usize,
+  source: &str,
+) -> RenderResult<usize> {
   match value {
     toml::Value::String(text) => encoded_string_bound(text, source),
     toml::Value::Integer(_) | toml::Value::Float(_) | toml::Value::Datetime(_) => Ok(64),
@@ -46,7 +74,7 @@ fn estimate_value(value: &toml::Value, depth: usize, source: &str) -> RenderResu
   }
 }
 
-fn encoded_string_bound(value: &str, source: &str) -> RenderResult<usize> {
+pub(crate) fn encoded_string_bound(value: &str, source: &str) -> RenderResult<usize> {
   let mut total = 2usize;
   for character in value.chars() {
     let bytes = match character {

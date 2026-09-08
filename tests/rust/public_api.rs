@@ -7,8 +7,9 @@ use online_dsl_forge::runtime::{
 use online_dsl_forge::{
   Analyzer, BinaryOp, CapabilityMeta, CompileOptions, CostModel, DynamicRegistry, EvalLimits,
   ExpressionDialect, ExpressionFunctionMode, MapRuntime, RegexFlavor, RuntimePatternSetConfig,
-  RuntimePatternSets, RuntimeSchema, SecurityProfile, Value, compile_expression, evaluate,
-  evaluate_verified, format_expression, oxirule_pattern_set_registry, parse_expression,
+  RuntimePatternSetLimits, RuntimePatternSets, RuntimeSchema, SecurityProfile, Value,
+  compile_expression, evaluate, evaluate_verified, evaluate_verified_with_resource_limits,
+  format_expression, oxirule_pattern_set_registry, parse_expression,
 };
 
 #[test]
@@ -503,6 +504,50 @@ fn compile_validation_reports_all_direct_unknowns() {
 }
 
 #[test]
+fn runtime_rejects_calls_left_unresolved_by_compatibility_options() {
+  let function = parse_expression("future()").expect("expression should parse");
+  let function_compiled = compile_expression(
+    &function,
+    &RuntimeSchema::new(),
+    CompileOptions {
+      allow_unknown_variables: false,
+      allow_unknown_functions: true,
+      allow_unknown_methods: false,
+    },
+  )
+  .expect("compatibility analysis should retain an unresolved function call");
+  let mut function_registry = DynamicRegistry::new();
+  function_registry.register_function("future", 0, |_| Ok(Value::Bool(true)));
+  let function_runtime = MapRuntime::new(BTreeMap::new(), function_registry);
+  let error = evaluate(&function_compiled, &function_runtime, EvalLimits::default())
+    .expect_err("an unresolved function must not dispatch through a later registry");
+  assert!(error.to_string().contains("unresolved function capability"));
+
+  let method = parse_expression("value.future()").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_variable("value");
+  let method_compiled = compile_expression(
+    &method,
+    &schema,
+    CompileOptions {
+      allow_unknown_variables: false,
+      allow_unknown_functions: false,
+      allow_unknown_methods: true,
+    },
+  )
+  .expect("compatibility analysis should retain an unresolved method call");
+  let mut method_registry = DynamicRegistry::new();
+  method_registry.register_method("future", 0, |_, _| Ok(Value::Bool(true)));
+  let method_runtime = MapRuntime::new(
+    BTreeMap::from([("value".to_string(), Value::Bool(true))]),
+    method_registry,
+  );
+  let error = evaluate(&method_compiled, &method_runtime, EvalLimits::default())
+    .expect_err("an unresolved method must not dispatch through a later registry");
+  assert!(error.to_string().contains("unresolved method capability"));
+}
+
+#[test]
 fn runtime_short_circuits_boolean_and() {
   let ast = parse_expression("false && missing").expect("expression should parse");
   let compiled = compile_expression(
@@ -805,6 +850,62 @@ fn runtime_pattern_sets_reject_invalid_regex() {
 }
 
 #[test]
+fn runtime_pattern_sets_reject_aggregate_source_before_regex_compilation() {
+  let error = RuntimePatternSets::compile_with_limits(
+    [
+      RuntimePatternSetConfig::regex("would-fail-to-compile", ["["]),
+      RuntimePatternSetConfig::contains("over-limit", ["a"]),
+    ],
+    RuntimePatternSetLimits {
+      max_total_pattern_bytes: 1,
+      ..RuntimePatternSetLimits::default()
+    },
+  )
+  .expect_err("aggregate source beyond the configured limit must fail");
+
+  assert_eq!(
+    error.message(),
+    "runtime pattern sets exceed max_total_pattern_bytes"
+  );
+}
+
+#[test]
+fn runtime_pattern_sets_bound_compiled_regex_size() {
+  let error = RuntimePatternSets::compile_with_limits(
+    [RuntimePatternSetConfig::regex("bounded", ["a{1000}"])],
+    RuntimePatternSetLimits {
+      max_compiled_regex_bytes: 1,
+      ..RuntimePatternSetLimits::default()
+    },
+  )
+  .expect_err("regex compilation beyond the configured size limit must fail");
+
+  assert!(
+    error
+      .to_string()
+      .contains("runtime pattern set bounded contains invalid regex pattern")
+  );
+}
+
+#[test]
+fn runtime_pattern_sets_bound_aggregate_compiled_regex_projection() {
+  let error = RuntimePatternSets::compile_with_limits(
+    [RuntimePatternSetConfig::regex("bounded", ["a", "b"])],
+    RuntimePatternSetLimits {
+      max_compiled_regex_bytes: 8,
+      max_total_compiled_regex_bytes: 15,
+      ..RuntimePatternSetLimits::default()
+    },
+  )
+  .expect_err("aggregate compiled-regex capacity beyond the configured limit must fail");
+
+  assert_eq!(
+    error.message(),
+    "runtime pattern sets exceed max_total_compiled_regex_bytes"
+  );
+}
+
+#[test]
 fn pattern_set_methods_match_string_array_receivers() {
   let pattern_sets = RuntimePatternSets::compile([RuntimePatternSetConfig::contains(
     "blocked-values",
@@ -863,6 +964,90 @@ fn pattern_set_methods_reject_non_string_array_items() {
     error
       .to_string()
       .contains("pattern-set methods require string array items")
+  );
+}
+
+#[test]
+fn pattern_set_methods_charge_candidate_and_pattern_complexity_before_matching() {
+  let pattern_sets = RuntimePatternSets::compile([RuntimePatternSetConfig::regex(
+    "blocked-values",
+    ["zzzzzzzz"],
+  )])
+  .expect("pattern set should compile");
+  let registry = oxirule_pattern_set_registry(pattern_sets);
+  let runtime = MapRuntime::new(
+    BTreeMap::from([(
+      "items".to_string(),
+      Value::Array(vec![Value::String("aaaaaaaaaaaaaaaa".to_string())]),
+    )]),
+    registry,
+  );
+  let ast =
+    parse_expression("items.matchesAny('blocked-values')").expect("expression should parse");
+  let verified = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &runtime.schema())
+    .expect("pattern call should analyze");
+  let error = evaluate_verified_with_resource_limits(
+    &verified,
+    &runtime,
+    EvalLimits::default(),
+    RuntimeResourceLimits {
+      max_total_value_bytes: 100,
+      ..RuntimeResourceLimits::default()
+    },
+  )
+  .expect_err("the pattern cross-product must consume the cumulative budget");
+
+  assert!(
+    error
+      .to_string()
+      .contains("runtime cumulative work byte limit exceeded")
+  );
+}
+
+#[test]
+fn runtime_rejects_non_finite_arithmetic_and_handler_results() {
+  let runtime = MapRuntime::new(BTreeMap::new(), DynamicRegistry::new());
+  let finite_operand = format!("1{}.0", "0".repeat(308));
+  let ast = parse_expression(&format!("{finite_operand} * {finite_operand}"))
+    .expect("finite operands should parse");
+  let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+    .expect("finite operands should compile");
+  let error = evaluate(&compiled, &runtime, EvalLimits::default())
+    .expect_err("floating-point overflow must fail closed");
+  assert!(error.to_string().contains("non-finite result"));
+
+  let mut registry = DynamicRegistry::new();
+  registry.register_function("host", 0, |_| Ok(Value::Float(f64::INFINITY)));
+  let runtime = MapRuntime::new(BTreeMap::new(), registry);
+  let ast = parse_expression("host()").expect("host call should parse");
+  let compiled = compile_expression(&ast, &runtime.schema(), CompileOptions::default())
+    .expect("host call should compile");
+  let error = evaluate(&compiled, &runtime, EvalLimits::default())
+    .expect_err("non-finite handler output must fail admission");
+  assert!(
+    error
+      .to_string()
+      .contains("runtime value contains a non-finite float")
+  );
+}
+
+#[test]
+fn tagged_float_deserialization_rejects_non_finite_exponents() {
+  let value_error = serde_json::from_str::<Value>(r#"{"type":"float","value":1e400}"#)
+    .expect_err("tagged Value float overflow must fail");
+  assert!(
+    value_error.to_string().contains("expected a finite f64"),
+    "unexpected Value error: {value_error}"
+  );
+
+  let ast_error = serde_json::from_str::<online_dsl_forge::AstExpression>(
+    r#"{"kind":{"kind":"float","value":1e400},"span":{"start":0,"end":5}}"#,
+  )
+  .expect_err("tagged AST float overflow must fail");
+  assert!(
+    ast_error.to_string().contains("expected a finite f64"),
+    "unexpected AST error: {ast_error}"
   );
 }
 

@@ -9,13 +9,13 @@ mod verified;
 pub use analyzer::{Analyzer, CompileOptions, ExpressionFunctionMode, compile_expression};
 pub use dialect::ExpressionDialect;
 pub use profile::{
-  BodyAccess, BodyNeedSummary, BodyTarget, Determinism, Phase, RegexPolicy, SecurityProfile,
-  SecurityProfileId,
+  BodyAccess, BodyNeedSummary, BodyTarget, Determinism, Phase, RegexAdmissionLimits, RegexPolicy,
+  SecurityProfile, SecurityProfileId,
 };
 pub use schema::{
   BodyPathRule, CapabilityKind, CapabilityMeta, CapabilityTicket, CostModel, ExpressionFunction,
-  ExpressionFunctionDiagnostic, ExpressionFunctionScope, RegexArgMeta, RegexFlavor, RuntimeSchema,
-  SignatureMatch, TypeClass, VariableMeta,
+  ExpressionFunctionDiagnostic, ExpressionFunctionLimits, ExpressionFunctionScope, RegexArgMeta,
+  RegexFlavor, RuntimeSchema, SignatureMatch, TypeClass, VariableMeta,
 };
 pub use verified::{
   CompiledExpression, CompiledRegexCache, RegexLiteral, VerifiedExprKindRef, VerifiedExpression,

@@ -611,6 +611,12 @@ pub(super) fn validate_value(
           .map_err(|_| EvalError::new("value graph traversal allocation failed", span))?;
         pending.extend(values.iter().rev().map(|(_, value)| (value, child_depth)));
       }
+      Value::Float(value) if !value.is_finite() => {
+        return Err(EvalError::new(
+          "runtime value contains a non-finite float",
+          span,
+        ));
+      }
       Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => {}
     }
   }

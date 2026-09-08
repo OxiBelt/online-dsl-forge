@@ -1,11 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::parser::preflight::drain_ast_iteratively;
 use crate::parser::{AstExpression, BinaryOp, Diagnostic, SourceSpan, UnaryOp};
 use serde::{Deserialize, Serialize};
 
 use crate::sema::profile::{BodyAccess, BodyTarget, Phase};
 
+mod expression_limits;
 mod oxirule;
+
+pub use expression_limits::ExpressionFunctionLimits;
+pub(crate) use expression_limits::{
+  DIAGNOSTIC_BUDGET_EXCEEDED, bounded_diagnostic_message, diagnostic_name,
+  expression_function_diagnostic_byte_limit, expression_function_diagnostic_limit,
+};
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -309,14 +317,15 @@ pub struct ExpressionFunctionDiagnostic {
 
 impl ExpressionFunctionDiagnostic {
   fn new(message: impl Into<String>, span: SourceSpan) -> Self {
+    let message = message.into();
     Self {
-      message: message.into(),
+      message: bounded_diagnostic_message(&message),
       span,
     }
   }
 
   pub fn diagnostic(&self) -> Diagnostic {
-    Diagnostic::new(self.message.clone(), self.span)
+    Diagnostic::new(bounded_diagnostic_message(&self.message), self.span)
   }
 }
 
@@ -333,6 +342,10 @@ pub struct RuntimeSchema {
   local_expression_functions: BTreeMap<String, ExpressionFunction>,
   #[serde(default)]
   expression_function_diagnostics: Vec<ExpressionFunctionDiagnostic>,
+  #[serde(default, skip_serializing_if = "is_false")]
+  expression_function_diagnostics_truncated: bool,
+  #[serde(default, skip_serializing_if = "ExpressionFunctionLimits::is_default")]
+  expression_function_limits: ExpressionFunctionLimits,
 }
 
 impl RuntimeSchema {
@@ -515,29 +528,51 @@ impl RuntimeSchema {
     expression: AstExpression,
   ) -> &mut Self {
     let name = name.into();
-    let params = params.into_iter().map(Into::into).collect::<Vec<_>>();
-    self.add_function(name.clone(), params.len());
-    let target = match scope {
-      ExpressionFunctionScope::Global => &mut self.expression_functions,
-      ExpressionFunctionScope::Local => &mut self.local_expression_functions,
+    let params =
+      match self.collect_expression_function_params(scope, &name, params, expression.span) {
+        Ok(params) => params,
+        Err(diagnostic) => {
+          self.push_expression_function_diagnostic(ExpressionFunctionDiagnostic::new(
+            diagnostic.message,
+            diagnostic.span,
+          ));
+          drain_ast_iteratively(expression);
+          return self;
+        }
+      };
+    let function = ExpressionFunction {
+      name: name.clone(),
+      params,
+      expression,
+      scope,
     };
-    if target.contains_key(&name) {
-      self
-        .expression_function_diagnostics
-        .push(ExpressionFunctionDiagnostic::new(
-          format!("duplicate expression function {name} in {scope:?} scope"),
-          expression.span,
-        ));
+    if let Err(diagnostic) = self.admit_expression_function(&function) {
+      self.push_expression_function_diagnostic(diagnostic);
+      drain_ast_iteratively(function.expression);
+      return self;
     }
-    target.insert(
-      name.clone(),
-      ExpressionFunction {
-        name,
-        params,
-        expression,
-        scope,
-      },
-    );
+    self.add_function(name.clone(), function.params.len());
+    let duplicate = match scope {
+      ExpressionFunctionScope::Global => self.expression_functions.contains_key(&name),
+      ExpressionFunctionScope::Local => self.local_expression_functions.contains_key(&name),
+    };
+    if duplicate {
+      let diagnostic = ExpressionFunctionDiagnostic::new(
+        format!(
+          "duplicate expression function {} in {scope:?} scope",
+          diagnostic_name(&name)
+        ),
+        function.expression.span,
+      );
+      self.push_expression_function_diagnostic(diagnostic);
+    }
+    let replaced = match scope {
+      ExpressionFunctionScope::Global => self.expression_functions.insert(name, function),
+      ExpressionFunctionScope::Local => self.local_expression_functions.insert(name, function),
+    };
+    if let Some(replaced) = replaced {
+      drain_ast_iteratively(replaced.expression);
+    }
     self
   }
 
@@ -635,6 +670,10 @@ impl RuntimeSchema {
   pub fn expression_function_diagnostics(&self) -> &[ExpressionFunctionDiagnostic] {
     &self.expression_function_diagnostics
   }
+}
+
+fn is_false(value: &bool) -> bool {
+  !*value
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

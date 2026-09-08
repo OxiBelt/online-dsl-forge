@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 
 use online_dsl_forge::rulepack_render::{
-  RulepackRenderLimits, inspect_rulepack_inputs_with_limits, render_rulepack_bundle_with_limits,
+  RulepackRenderLimits, inspect_rulepack, inspect_rulepack_inputs,
+  inspect_rulepack_inputs_with_limits, render_rulepack_bundle_with_limits,
   render_rulepack_for_install_with_limits, render_text, render_text_with_limits,
 };
 use online_dsl_forge::{
   BlobFileResolver, BlobStore, FileResolver, MemoryFileResolver, RulepackActionSelector,
-  RulepackOverride, RulepackOverrideSelector, RulepackRenderOptions, referenced_rulepack_files,
-  render_rulepack_bundle, render_rulepack_for_install,
+  RulepackException, RulepackOverride, RulepackOverrideSelector, RulepackRenderOptions,
+  referenced_rulepack_files, render_rulepack_bundle, render_rulepack_for_install,
 };
 
 #[test]
@@ -278,7 +279,13 @@ fn bounded_text_limits_accept_exact_values_and_reject_next_and_zero() {
         max_variable_value_bytes: 0,
         max_total_variable_bytes: 0,
         max_variables: 0,
+        max_profile_assignments: 0,
         max_rulepack_files: 0,
+        max_overrides: 0,
+        max_exceptions: 0,
+        max_selector_work: 0,
+        max_local_option_bytes: 0,
+        max_override_body_bytes: 0,
         max_placeholders: 0,
         max_total_input_bytes: 0,
         max_total_output_bytes: 0,
@@ -663,6 +670,379 @@ fn manifest_byte_limit_accepts_exact_and_rejects_next() {
   );
 }
 
+#[test]
+fn profile_assignment_limit_accepts_exact_and_rejects_next() {
+  let manifest = manifest_with_profile_assignments();
+  inspect_rulepack_inputs_with_limits(
+    &manifest,
+    "test rulepack",
+    RulepackRenderLimits {
+      max_profile_assignments: 2,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect("two profile assignments should meet the exact limit");
+  let error = inspect_rulepack_inputs_with_limits(
+    &manifest,
+    "test rulepack",
+    RulepackRenderLimits {
+      max_profile_assignments: 1,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect_err("the next profile assignment must fail admission");
+  assert!(error.to_string().contains("profile assignments limit"));
+}
+
+#[test]
+fn local_override_and_exception_limits_are_inclusive() {
+  render_rulepack_for_install_with_limits(
+    &minimal_manifest(),
+    "test rulepack",
+    RulepackRenderOptions {
+      local_overrides: vec![enabled_override()],
+      ..RulepackRenderOptions::default()
+    },
+    RulepackRenderLimits {
+      max_overrides: 1,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect("one override should meet the exact limit");
+  let override_error = render_rulepack_for_install_with_limits(
+    &minimal_manifest(),
+    "test rulepack",
+    RulepackRenderOptions {
+      local_overrides: vec![enabled_override()],
+      ..RulepackRenderOptions::default()
+    },
+    RulepackRenderLimits {
+      max_overrides: 0,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect_err("the first override above zero must fail admission");
+  assert!(override_error.to_string().contains("overrides limit"));
+
+  render_rulepack_for_install_with_limits(
+    &minimal_manifest(),
+    "test rulepack",
+    RulepackRenderOptions {
+      local_exceptions: vec![login_exception()],
+      ..RulepackRenderOptions::default()
+    },
+    RulepackRenderLimits {
+      max_exceptions: 1,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect("one exception should meet the exact limit");
+  let exception_error = render_rulepack_for_install_with_limits(
+    &minimal_manifest(),
+    "test rulepack",
+    RulepackRenderOptions {
+      local_exceptions: vec![login_exception()],
+      ..RulepackRenderOptions::default()
+    },
+    RulepackRenderLimits {
+      max_exceptions: 0,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect_err("the first exception above zero must fail admission");
+  assert!(exception_error.to_string().contains("exceptions limit"));
+}
+
+#[test]
+fn manifest_and_local_structure_limits_are_aggregate() {
+  let mut local_exception = login_exception();
+  local_exception.name = "local-login-exception".to_string();
+  let options = RulepackRenderOptions {
+    local_overrides: vec![enabled_override()],
+    local_exceptions: vec![local_exception],
+    ..RulepackRenderOptions::default()
+  };
+  let manifest = manifest_with_override_and_exception();
+  render_rulepack_for_install_with_limits(
+    &manifest,
+    "test rulepack",
+    options.clone(),
+    RulepackRenderLimits {
+      max_overrides: 2,
+      max_exceptions: 2,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect("combined counts at their exact limits should pass");
+
+  for limits in [
+    RulepackRenderLimits {
+      max_overrides: 1,
+      ..RulepackRenderLimits::default()
+    },
+    RulepackRenderLimits {
+      max_exceptions: 1,
+      ..RulepackRenderLimits::default()
+    },
+  ] {
+    assert!(
+      render_rulepack_for_install_with_limits(&manifest, "test rulepack", options.clone(), limits,)
+        .is_err()
+    );
+  }
+}
+
+#[test]
+fn selector_work_and_local_option_byte_limits_are_inclusive() {
+  let local_bytes = 512 + "demo".len();
+  let options = RulepackRenderOptions {
+    local_overrides: vec![enabled_override()],
+    ..RulepackRenderOptions::default()
+  };
+  render_rulepack_for_install_with_limits(
+    &minimal_manifest(),
+    "test rulepack",
+    options.clone(),
+    RulepackRenderLimits {
+      max_selector_work: 2,
+      max_local_option_bytes: local_bytes,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect("selector work and local bytes at their exact limits should pass");
+
+  let selector_error = render_rulepack_for_install_with_limits(
+    &minimal_manifest(),
+    "test rulepack",
+    options.clone(),
+    RulepackRenderLimits {
+      max_selector_work: 1,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect_err("the second selector comparison must fail before application");
+  assert!(
+    selector_error
+      .to_string()
+      .contains("selector work units limit")
+  );
+
+  let byte_error = render_rulepack_for_install_with_limits(
+    &minimal_manifest(),
+    "test rulepack",
+    options,
+    RulepackRenderLimits {
+      max_local_option_bytes: local_bytes - 1,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect_err("the next local option byte must fail admission");
+  assert!(byte_error.to_string().contains("local option bytes limit"));
+}
+
+#[test]
+fn local_collection_storage_counts_toward_the_byte_limit() {
+  let exception = RulepackException {
+    name: "e".to_string(),
+    rule_ids: Vec::new(),
+    rule_names: vec!["login".to_string()],
+    tags: Vec::new(),
+    routes: vec!["r".to_string(), "r".to_string()],
+    methods: Vec::new(),
+    path_prefixes: Vec::new(),
+    source_cidrs: Vec::new(),
+    reason: "x".to_string(),
+    expires_at: None,
+  };
+  let options = RulepackRenderOptions {
+    local_exceptions: vec![exception],
+    ..RulepackRenderOptions::default()
+  };
+  let exact_bytes = 512 + 1 + (32 + 5) + (2 * 32 + 2) + 1;
+  render_rulepack_for_install_with_limits(
+    &minimal_manifest(),
+    "test rulepack",
+    options.clone(),
+    RulepackRenderLimits {
+      max_local_option_bytes: exact_bytes,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect("collection storage at the exact byte limit should pass");
+  let error = render_rulepack_for_install_with_limits(
+    &minimal_manifest(),
+    "test rulepack",
+    options,
+    RulepackRenderLimits {
+      max_local_option_bytes: exact_bytes - 1,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect_err("the next collection storage byte must fail admission");
+  assert!(error.to_string().contains("local option bytes limit"));
+}
+
+#[test]
+fn override_body_limit_is_inclusive_and_fanout_is_preflighted() {
+  let body = "blocked";
+  render_rulepack_for_install_with_limits(
+    &manifest_with_reject_actions(1),
+    "test rulepack",
+    RulepackRenderOptions {
+      local_overrides: vec![body_override(body)],
+      ..RulepackRenderOptions::default()
+    },
+    RulepackRenderLimits {
+      max_override_body_bytes: body.len(),
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect("an override body at the exact limit should render");
+  let body_error = render_rulepack_for_install_with_limits(
+    &manifest_with_reject_actions(1),
+    "test rulepack",
+    RulepackRenderOptions {
+      local_overrides: vec![body_override(body)],
+      ..RulepackRenderOptions::default()
+    },
+    RulepackRenderLimits {
+      max_override_body_bytes: body.len() - 1,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect_err("an oversized body must fail before override application");
+  assert!(body_error.to_string().contains("override body bytes limit"));
+
+  let large_body = "x".repeat(1024 * 1024);
+  let fanout_error = render_rulepack_for_install_with_limits(
+    &manifest_with_reject_actions(65),
+    "test rulepack",
+    RulepackRenderOptions {
+      local_overrides: vec![body_override(&large_body)],
+      ..RulepackRenderOptions::default()
+    },
+    RulepackRenderLimits::default(),
+  )
+  .expect_err("projected body fanout must fail before cloning bodies into rules");
+  assert!(
+    fanout_error
+      .to_string()
+      .contains("aggregate retained render bytes limit")
+  );
+}
+
+#[test]
+fn local_exception_growth_is_preflighted_against_output_budget() {
+  let manifest = minimal_manifest();
+  let options = RulepackRenderOptions {
+    local_exceptions: vec![login_exception()],
+    ..RulepackRenderOptions::default()
+  };
+  let mut rejected = 0usize;
+  let mut accepted = RulepackRenderLimits::default().max_total_output_bytes;
+  while rejected + 1 < accepted {
+    let candidate = rejected + (accepted - rejected) / 2;
+    if render_rulepack_for_install_with_limits(
+      &manifest,
+      "test rulepack",
+      options.clone(),
+      RulepackRenderLimits {
+        max_total_output_bytes: candidate,
+        ..RulepackRenderLimits::default()
+      },
+    )
+    .is_ok()
+    {
+      accepted = candidate;
+    } else {
+      rejected = candidate;
+    }
+  }
+  render_rulepack_for_install_with_limits(
+    &manifest,
+    "test rulepack",
+    options.clone(),
+    RulepackRenderLimits {
+      max_total_output_bytes: accepted,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect("the exact projected local exception budget should pass");
+  let error = render_rulepack_for_install_with_limits(
+    &manifest,
+    "test rulepack",
+    options,
+    RulepackRenderLimits {
+      max_total_output_bytes: accepted - 1,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect_err("the next retained local exception byte must fail before mutation");
+  assert!(
+    error
+      .to_string()
+      .contains("aggregate retained render bytes limit")
+  );
+}
+
+#[test]
+fn exception_selector_budget_fails_before_template_rendering() {
+  let manifest = manifest_with_override_and_exception()
+    .replace("version = \"0.1.0\"", "version = \"{{missing}}\"");
+  let mut local_exception = login_exception();
+  local_exception.name = "local-login-exception".to_string();
+  let options = RulepackRenderOptions {
+    local_exceptions: vec![local_exception],
+    ..RulepackRenderOptions::default()
+  };
+  let rendering_error = render_rulepack_for_install_with_limits(
+    &manifest,
+    "test rulepack",
+    options.clone(),
+    RulepackRenderLimits::default(),
+  )
+  .expect_err("the manifest must reach its later template-rendering failure with enough work");
+  assert!(rendering_error.to_string().contains("unknown placeholder"));
+
+  let error = render_rulepack_for_install_with_limits(
+    &manifest,
+    "test rulepack",
+    options,
+    RulepackRenderLimits {
+      max_selector_work: 3,
+      ..RulepackRenderLimits::default()
+    },
+  )
+  .expect_err("combined exception selector work must fail before template rendering");
+  assert!(error.to_string().contains("selector work units limit of 3"));
+}
+
+#[test]
+fn infallible_text_rendering_returns_empty_at_default_limit() {
+  let variables = BTreeMap::from([("x".to_string(), "x".repeat(1024 * 1024))]);
+  assert_eq!(render_text("{{missing}}", &BTreeMap::new()), "{{missing}}");
+  assert_eq!(render_text(&"{{x}}".repeat(65), &variables), "");
+}
+
+#[test]
+fn inspect_and_install_reject_unsafe_referenced_paths() {
+  let direct = manifest_with_unsafe_rule_path("../rules/login.oxirule.toml", false);
+  assert!(inspect_rulepack_inputs(&direct, "test rulepack").is_err());
+  assert!(inspect_rulepack(&direct, "test rulepack", RulepackRenderOptions::default()).is_err());
+  assert!(
+    render_rulepack_for_install(&direct, "test rulepack", RulepackRenderOptions::default())
+      .is_err()
+  );
+
+  let templated = manifest_with_unsafe_rule_path("rules/{{segment}}.oxirule.toml", true);
+  let options = RulepackRenderOptions {
+    variables: BTreeMap::from([("segment".to_string(), "../../escape".to_string())]),
+    ..RulepackRenderOptions::default()
+  };
+  assert!(inspect_rulepack(&templated, "test rulepack", options.clone()).is_err());
+  assert!(render_rulepack_for_install(&templated, "test rulepack", options).is_err());
+}
+
 fn manifest_with_paths() -> &'static str {
   r#"[rulepack]
 schema_version = 2
@@ -830,4 +1210,153 @@ fn rate_override(rate: &str) -> RulepackOverride {
     status: None,
     body: None,
   }
+}
+
+fn enabled_override() -> RulepackOverride {
+  RulepackOverride {
+    selector: RulepackOverrideSelector {
+      rulepack: Some("demo".to_string()),
+      tags: Vec::new(),
+      rule_id: None,
+      rule_name: None,
+    },
+    action: None,
+    mode: None,
+    priority: None,
+    enabled: Some(true),
+    rate: None,
+    burst: None,
+    status: None,
+    body: None,
+  }
+}
+
+fn body_override(body: &str) -> RulepackOverride {
+  RulepackOverride {
+    selector: RulepackOverrideSelector {
+      rulepack: Some("demo".to_string()),
+      tags: Vec::new(),
+      rule_id: None,
+      rule_name: None,
+    },
+    action: Some(RulepackActionSelector {
+      action_type: "reject".to_string(),
+      name: None,
+    }),
+    mode: None,
+    priority: None,
+    enabled: None,
+    rate: None,
+    burst: None,
+    status: None,
+    body: Some(body.to_string()),
+  }
+}
+
+fn login_exception() -> RulepackException {
+  RulepackException {
+    name: "temporary-login-exception".to_string(),
+    rule_ids: Vec::new(),
+    rule_names: vec!["login".to_string()],
+    tags: Vec::new(),
+    routes: vec!["login".to_string()],
+    methods: Vec::new(),
+    path_prefixes: Vec::new(),
+    source_cidrs: Vec::new(),
+    reason: "test".to_string(),
+    expires_at: None,
+  }
+}
+
+fn manifest_with_profile_assignments() -> String {
+  format!(
+    r#"{}
+[[variables]]
+name = "first"
+type = "string"
+
+[[variables]]
+name = "second"
+type = "string"
+
+[[profiles]]
+name = "production"
+
+[profiles.values]
+first = "one"
+second = "two"
+"#,
+    minimal_manifest()
+  )
+}
+
+fn manifest_with_override_and_exception() -> String {
+  format!(
+    r#"{}
+[[overrides]]
+enabled = true
+
+[overrides.selector]
+rulepack = "demo"
+
+[[exceptions]]
+name = "manifest-login-exception"
+rule_names = ["login"]
+routes = ["login"]
+reason = "test"
+"#,
+    minimal_manifest()
+  )
+}
+
+fn manifest_with_reject_actions(rule_count: usize) -> String {
+  let mut manifest = r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+"#
+  .to_string();
+  for index in 0..rule_count {
+    manifest.push_str(&format!(
+      r#"
+[[rules]]
+name = "rule-{index}"
+phase = "request"
+priority = 100
+content = '''
+when = "true"
+
+[[actions]]
+type = "reject"
+'''
+"#
+    ));
+  }
+  manifest
+}
+
+fn manifest_with_unsafe_rule_path(path: &str, declares_segment: bool) -> String {
+  let variable = if declares_segment {
+    r#"
+[[variables]]
+name = "segment"
+type = "string"
+required = true
+"#
+  } else {
+    ""
+  };
+  format!(
+    r#"[rulepack]
+schema_version = 2
+name = "demo"
+version = "0.1.0"
+{variable}
+[[rules]]
+name = "login"
+phase = "request"
+priority = 100
+path = "{path}"
+"#
+  )
 }

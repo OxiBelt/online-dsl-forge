@@ -24,11 +24,16 @@ pub(crate) fn validate_markers_without_count(
   measure(raw, variables, declared, None, source, true).map(drop)
 }
 
-pub(crate) fn render_legacy(raw: &str, variables: &BTreeMap<String, String>) -> String {
+pub(crate) fn render_legacy_bounded(
+  raw: &str,
+  variables: &BTreeMap<String, String>,
+  meter: &mut RenderMeter,
+  source: &str,
+) -> RenderResult<String> {
   let declared = variables.keys().cloned().collect();
-  let length = measure(raw, variables, &declared, None, "text", false).unwrap_or(raw.len());
-  render_measured(raw, variables, &declared, "text", false, length)
-    .unwrap_or_else(|_| raw.to_string())
+  let length = measure(raw, variables, &declared, Some(meter), source, false)?;
+  meter.reserve_render_work(length, source)?;
+  render_measured(raw, variables, &declared, source, false, length)
 }
 
 pub(crate) fn reject_markers_outside_toml_strings(raw: &str, source: &str) -> RenderResult<()> {

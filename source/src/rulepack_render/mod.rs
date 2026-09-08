@@ -1,5 +1,6 @@
 //! In-memory rulepack manifest rendering and referenced-file expansion.
 
+mod admission;
 mod error;
 mod exceptions;
 mod files;
@@ -47,9 +48,8 @@ pub fn inspect_rulepack_inputs_with_limits(
   meter.manifest(raw, source)?;
   let value = toml_value(raw, source)?;
   let document = document_from_value(value, source)?;
-  validate_document_shape(&document, source, ExceptionValidation::Skip)?;
+  admission::admit_rulepack_structure(&document, None, &mut meter, source)?;
   meter.files(document.rules.len(), document.group_files.len(), source)?;
-  let declared = declared_names(&document);
   meter.check_variable_entries(
     document
       .variables
@@ -61,10 +61,12 @@ pub fn inspect_rulepack_inputs_with_limits(
           .iter()
           .map(|item| (item.bind_as.as_str(), "")),
       ),
-    declared.len(),
+    input_entry_count(&document, source)?,
     source,
   )?;
   check_embedded_file_sizes(&document, &mut meter, source)?;
+  validate_document_shape(&document, source)?;
+  validate_document_references(&document)?;
   Ok(RulepackInputMetadata {
     summary: summary_from_document(&document, Vec::new()),
     variables: document.variables,
@@ -130,7 +132,6 @@ pub fn referenced_rulepack_files_with_limits(
 ) -> RenderResult<Vec<RulepackReferencedFile>> {
   let mut meter = RenderMeter::new(limits);
   let parsed = ParsedRulepack::parse(raw, source, options, &mut meter)?;
-  parsed.validate_references()?;
   files::referenced_rulepack_files(&parsed.document)
 }
 
@@ -158,7 +159,6 @@ pub fn render_rulepack_bundle_with_limits<R: FileResolver + ?Sized>(
 ) -> RenderResult<RenderedRulepackBundle> {
   let mut meter = RenderMeter::new(limits);
   let parsed = ParsedRulepack::parse(raw, source, options, &mut meter)?;
-  parsed.validate_references()?;
   let mut loaded_files = Vec::new();
   let mut rendered_files = Vec::new();
   for rule in &parsed.document.rules {
@@ -210,7 +210,15 @@ pub fn render_rulepack_bundle_with_limits<R: FileResolver + ?Sized>(
 }
 
 pub fn render_text(raw: &str, variables: &BTreeMap<String, String>) -> String {
-  template::render_legacy(raw, variables)
+  let mut meter = RenderMeter::new(RulepackRenderLimits::default());
+  let rendered: RenderResult<String> = (|| {
+    meter.manifest(raw, "text template")?;
+    meter.admit_supplied_variables(variables, "text template")?;
+    let rendered = template::render_legacy_bounded(raw, variables, &mut meter, "text template")?;
+    meter.output(rendered.len(), "text template")?;
+    Ok(rendered)
+  })();
+  rendered.unwrap_or_default()
 }
 
 pub fn render_text_with_limits(
@@ -244,15 +252,42 @@ impl ParsedRulepack {
     meter.manifest(raw, source)?;
     let mut value = toml_value(raw, source)?;
     let initial = document_from_value(value.clone(), source)?;
-    validate_document_shape(&initial, source, ExceptionValidation::Skip)?;
+    admission::admit_rulepack_structure(&initial, Some(&options), meter, source)?;
+    meter.files(initial.rules.len(), initial.group_files.len(), source)?;
+    meter.admit_supplied_variables(&options.variables, source)?;
+    meter.check_variable_entries(
+      initial
+        .variables
+        .iter()
+        .map(|variable| {
+          (
+            variable.name.as_str(),
+            variable.default.as_deref().unwrap_or(""),
+          )
+        })
+        .chain(
+          initial
+            .bindings
+            .iter()
+            .map(|binding| (binding.bind_as.as_str(), "")),
+        ),
+      input_entry_count(&initial, source)?,
+      source,
+    )?;
+    validate_document_shape(&initial, source)?;
     exceptions::validate_rulepack_exception_list(source, &options.local_exceptions)?;
     overrides::validate_rulepack_overrides(
       source,
       &initial.rulepack.name,
       &options.local_overrides,
     )?;
-    meter.files(initial.rules.len(), initial.group_files.len(), source)?;
-    meter.admit_supplied_variables(&options.variables, source)?;
+    exceptions::reserve_rulepack_exception_selector_work(
+      source,
+      &initial.exceptions,
+      &options.local_exceptions,
+      &initial.rules,
+      meter,
+    )?;
     let declared = declared_names(&initial);
     let variables = resolve_variables(
       &initial.variables,
@@ -269,7 +304,9 @@ impl ParsedRulepack {
       &initial.rulepack.name,
       &initial.overrides,
       &options.local_overrides,
+      meter,
     )?;
+    admission::reserve_option_mutations(&value, &initial, &variables, &options, meter, source)?;
     apply_mode_override(&mut value, options.mode_override)?;
     exceptions::append_local_exceptions(&mut value, source, &options.local_exceptions)?;
     if options.pin_variables {
@@ -286,9 +323,10 @@ impl ParsedRulepack {
     if let Some(provenance) = options.source_provenance {
       provenance::set_rulepack_provenance(&mut value, provenance)?;
     }
-    serialization::reserve_toml_serialization(&value, meter, source, true)?;
     let document = document_from_value(value.clone(), source)?;
-    validate_document_shape(&document, source, ExceptionValidation::Full)?;
+    validate_document_shape(&document, source)?;
+    exceptions::validate_rulepack_exceptions(source, &document.exceptions, &document.rules)?;
+    validate_document_references(&document)?;
     let rendered = toml::to_string_pretty(&value)
       .map_err(|error| RulepackRenderError::new(format!("failed to render {source}: {error}")))?;
     meter.output(rendered.len(), source)?;
@@ -298,25 +336,6 @@ impl ParsedRulepack {
       variables,
       declared,
     })
-  }
-
-  fn validate_references(&self) -> RenderResult<()> {
-    for rule in &self.document.rules {
-      files::validate_rule_content_or_path(
-        &format!(
-          "rulepack {} rule {}",
-          self.document.rulepack.name, rule.name
-        ),
-        rule,
-      )?;
-    }
-    for group_file in &self.document.group_files {
-      files::validate_group_content_or_path(
-        &format!("rulepack {} group file", self.document.rulepack.name),
-        group_file,
-      )?;
-    }
-    Ok(())
   }
 
   fn summary(&self, loaded_files: Vec<PathBuf>) -> RulepackSummary {
@@ -337,17 +356,7 @@ fn document_from_value(value: toml::Value, source: &str) -> RenderResult<Rulepac
     .map_err(|error| RulepackRenderError::new(format!("failed to decode {source}: {error}")))
 }
 
-#[derive(Clone, Copy)]
-enum ExceptionValidation {
-  Skip,
-  Full,
-}
-
-fn validate_document_shape(
-  document: &RulepackDocument,
-  source: &str,
-  exception_validation: ExceptionValidation,
-) -> RenderResult<()> {
+fn validate_document_shape(document: &RulepackDocument, source: &str) -> RenderResult<()> {
   validate_metadata(source, &document.rulepack)?;
   if document.rules.is_empty() && document.group_files.is_empty() {
     return fail(format!(
@@ -361,9 +370,6 @@ fn validate_document_shape(
     &document.profiles,
   )?;
   overrides::validate_rulepack_overrides(source, &document.rulepack.name, &document.overrides)?;
-  if matches!(exception_validation, ExceptionValidation::Full) {
-    exceptions::validate_rulepack_exceptions(source, &document.exceptions, &document.rules)?;
-  }
   let mut rule_names = HashSet::new();
   for rule in &document.rules {
     validate_label(source, "rules.name", &rule.name)?;
@@ -373,6 +379,22 @@ fn validate_document_shape(
     for tag in &rule.tags {
       validate_label(source, "rules.tags", tag)?;
     }
+  }
+  Ok(())
+}
+
+fn validate_document_references(document: &RulepackDocument) -> RenderResult<()> {
+  for rule in &document.rules {
+    files::validate_rule_content_or_path(
+      &format!("rulepack {} rule {}", document.rulepack.name, rule.name),
+      rule,
+    )?;
+  }
+  for group_file in &document.group_files {
+    files::validate_group_content_or_path(
+      &format!("rulepack {} group file", document.rulepack.name),
+      group_file,
+    )?;
   }
   Ok(())
 }
@@ -489,6 +511,14 @@ fn declared_names(document: &RulepackDocument) -> HashSet<String> {
         .map(|binding| binding.bind_as.clone()),
     )
     .collect()
+}
+
+fn input_entry_count(document: &RulepackDocument, source: &str) -> RenderResult<usize> {
+  document
+    .variables
+    .len()
+    .checked_add(document.bindings.len())
+    .ok_or_else(|| RulepackRenderError::new(format!("{source} variable count overflow")))
 }
 
 fn check_embedded_file_sizes(
