@@ -2,7 +2,9 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use crate::parser::{BinaryOp, SourceSpan, UnaryOp};
-use crate::sema::{VerifiedExprKindRef, VerifiedExpression, VerifiedProgram};
+use crate::sema::{
+  CapabilityKind, CapabilityTicket, VerifiedExprKindRef, VerifiedExpression, VerifiedProgram,
+};
 use crate::value::{Value, ValueMetrics};
 
 use super::operators::{add_values, compare_values, expect_bool, numeric_arithmetic};
@@ -71,12 +73,14 @@ impl EvalState<'_> {
         self.eval_member(value, name, span)
       }
       VerifiedExprKindRef::FunctionCall { name, args } => {
-        if expression.capability_ticket().is_none() {
-          return Err(EvalError::new(
-            "runtime cannot execute an unresolved function capability",
-            span,
-          ));
-        }
+        require_dispatch_ticket(
+          expression.capability_ticket(),
+          CapabilityKind::Function,
+          name,
+          args.len(),
+          "runtime cannot execute an unresolved function capability",
+          span,
+        )?;
         let args = self.eval_args(args, context, depth)?;
         let value = context
           .registry()
@@ -104,12 +108,14 @@ impl EvalState<'_> {
         name,
         args,
       } => {
-        if expression.capability_ticket().is_none() {
-          return Err(EvalError::new(
-            "runtime cannot execute an unresolved method capability",
-            span,
-          ));
-        }
+        require_dispatch_ticket(
+          expression.capability_ticket(),
+          CapabilityKind::Method,
+          name,
+          args.len(),
+          "runtime cannot execute an unresolved method capability",
+          span,
+        )?;
         let receiver = self.eval(receiver, context, depth + 1)?;
         let args = self.eval_args(args, context, depth)?;
         let value =
@@ -119,10 +125,26 @@ impl EvalState<'_> {
         self.admit(value, span)
       }
       VerifiedExprKindRef::Unary { op, expr } => {
+        require_dispatch_ticket(
+          expression.capability_ticket(),
+          CapabilityKind::UnaryOp,
+          op.as_str(),
+          1,
+          "runtime cannot execute an unresolved unary operator capability",
+          span,
+        )?;
         let value = self.eval(expr, context, depth + 1)?;
         self.eval_unary(op, value, context.registry(), span)
       }
       VerifiedExprKindRef::Binary { left, op, right } => {
+        require_dispatch_ticket(
+          expression.capability_ticket(),
+          CapabilityKind::BinaryOp,
+          op.as_str(),
+          2,
+          "runtime cannot execute an unresolved binary operator capability",
+          span,
+        )?;
         self.eval_binary(left, op, right, context, depth, span)
       }
     }
@@ -417,5 +439,61 @@ impl EvalState<'_> {
       self.limits.max_string_bytes,
       span,
     )
+  }
+}
+
+fn require_dispatch_ticket(
+  ticket: Option<&CapabilityTicket>,
+  kind: CapabilityKind,
+  name: &str,
+  arity: usize,
+  unresolved_message: &str,
+  span: SourceSpan,
+) -> Result<(), EvalError> {
+  let Some(ticket) = ticket else {
+    return Err(EvalError::new(unresolved_message, span));
+  };
+  if ticket.kind == kind && ticket.name == name && ticket.arity == arity {
+    Ok(())
+  } else {
+    Err(EvalError::new(
+      "verified capability ticket does not match runtime dispatch identity",
+      span,
+    ))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn dispatch_ticket_must_match_the_executed_capability() {
+    let span = SourceSpan::default();
+    let ticket = CapabilityTicket::new(CapabilityKind::Function, "safe", 1);
+    assert!(
+      require_dispatch_ticket(
+        Some(&ticket),
+        CapabilityKind::Function,
+        "safe",
+        1,
+        "unresolved",
+        span,
+      )
+      .is_ok()
+    );
+    for (kind, name, arity) in [
+      (CapabilityKind::Method, "safe", 1),
+      (CapabilityKind::Function, "privileged", 1),
+      (CapabilityKind::Function, "safe", 2),
+    ] {
+      let error = require_dispatch_ticket(Some(&ticket), kind, name, arity, "unresolved", span)
+        .expect_err("any dispatch identity mismatch must fail closed");
+      assert!(
+        error
+          .to_string()
+          .contains("does not match runtime dispatch")
+      );
+    }
   }
 }

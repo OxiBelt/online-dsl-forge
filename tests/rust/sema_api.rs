@@ -1437,6 +1437,72 @@ fn doubling_schema(levels: usize) -> RuntimeSchema {
 }
 
 #[test]
+fn runtime_schema_rejects_forged_capability_identity() {
+  let mut schema = RuntimeSchema::new();
+  schema.add_function("safe", 0);
+  let mut encoded = serde_json::to_value(schema).expect("schema should serialize");
+  let functions = encoded
+    .get_mut("functions")
+    .and_then(serde_json::Value::as_object_mut)
+    .expect("functions should serialize as an object");
+  let safe = functions
+    .remove("safe")
+    .expect("safe capability should be present");
+  functions.insert("privileged".to_string(), safe);
+
+  let error = serde_json::from_value::<RuntimeSchema>(encoded)
+    .expect_err("an outer dispatch name may not differ from embedded metadata");
+  assert!(
+    error
+      .to_string()
+      .contains("runtime schema function identity mismatch")
+  );
+}
+
+#[test]
+fn analyzer_rejects_programmatic_capability_kind_mismatch() {
+  let ast = parse_expression("privileged()").expect("expression should parse");
+  let mut schema = RuntimeSchema::new();
+  schema.add_function_capability(CapabilityMeta::method("privileged", 0));
+
+  let error = Analyzer::new(SecurityProfile::generic_safe())
+    .analyze(&ast, &schema)
+    .expect_err("programmatic schemas must receive the same integrity check");
+  assert!(
+    error
+      .to_string()
+      .contains("runtime schema function identity mismatch")
+  );
+}
+
+#[test]
+fn deserialized_schema_uses_out_of_band_expression_function_limits() {
+  let schema = RuntimeSchema::new().with_expression_function_limits(ExpressionFunctionLimits {
+    max_functions: usize::MAX,
+    ..ExpressionFunctionLimits::default()
+  });
+  let mut encoded = serde_json::to_value(schema).expect("schema should serialize");
+  assert!(
+    encoded.get("expression_function_limits").is_none(),
+    "host policy must not be serialized in-band"
+  );
+  encoded
+    .as_object_mut()
+    .expect("schema should serialize as an object")
+    .insert(
+      "expression_function_limits".to_string(),
+      serde_json::json!({ "max_functions": usize::MAX }),
+    );
+
+  let decoded: RuntimeSchema =
+    serde_json::from_value(encoded).expect("legacy in-band limits should be ignored");
+  assert_eq!(
+    decoded.expression_function_limits(),
+    ExpressionFunctionLimits::default()
+  );
+}
+
+#[test]
 fn inline_function_expansion_is_metered_before_exponential_allocation() {
   let schema = doubling_schema(13);
   let ast = parse_expression("double13(1)").expect("root should parse");

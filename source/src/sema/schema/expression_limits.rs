@@ -29,12 +29,6 @@ pub struct ExpressionFunctionLimits {
   pub max_total_diagnostic_bytes: usize,
 }
 
-impl ExpressionFunctionLimits {
-  pub(crate) fn is_default(value: &Self) -> bool {
-    *value == Self::default()
-  }
-}
-
 impl Default for ExpressionFunctionLimits {
   fn default() -> Self {
     Self {

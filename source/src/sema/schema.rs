@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::sema::profile::{BodyAccess, BodyTarget, Phase};
 
 mod expression_limits;
+mod integrity;
 mod oxirule;
 
 pub use expression_limits::ExpressionFunctionLimits;
@@ -330,6 +331,7 @@ impl ExpressionFunctionDiagnostic {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
+#[serde(try_from = "integrity::RuntimeSchemaWire")]
 pub struct RuntimeSchema {
   variables: BTreeMap<String, VariableMeta>,
   functions: BTreeMap<String, BTreeMap<usize, CapabilityMeta>>,
@@ -344,7 +346,7 @@ pub struct RuntimeSchema {
   expression_function_diagnostics: Vec<ExpressionFunctionDiagnostic>,
   #[serde(default, skip_serializing_if = "is_false")]
   expression_function_diagnostics_truncated: bool,
-  #[serde(default, skip_serializing_if = "ExpressionFunctionLimits::is_default")]
+  #[serde(skip)]
   expression_function_limits: ExpressionFunctionLimits,
 }
 

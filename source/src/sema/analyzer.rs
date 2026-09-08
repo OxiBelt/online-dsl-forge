@@ -93,6 +93,9 @@ impl Analyzer {
     expression: &'a AstExpression,
     schema: &'a RuntimeSchema,
   ) -> Result<VerifiedProgram, DiagnosticReport> {
+    if let Err(diagnostic) = schema.validate_integrity() {
+      return Err(DiagnosticReport::new(vec![diagnostic]));
+    }
     let schema_diagnostics = schema.validated_expression_function_diagnostics();
     if !schema_diagnostics.is_empty() {
       return Err(DiagnosticReport::new(schema_diagnostics));
