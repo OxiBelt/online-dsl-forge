@@ -34,9 +34,11 @@ budgets with `parse_expression_with_limits`,
 `MapRuntime::from_json_bindings_with_limits`, and the rulepack renderer's
 `*_with_limits` functions. Use the fallible formatter and rulepack text
 renderer when an AST or template comes from outside the parser or another
-trusted construction path; the infallible formatter returns an empty string at
-its default budget. Runtime value depth is capped at 128, and JSON integer-form
-tokens outside `i64` are rejected rather than rounded to floats.
+trusted construction path; the infallible formatter and text renderer return
+an empty string when work exceeds their default budgets. Runtime value depth is
+capped at 128, crate-owned input-dependent handlers charge the cumulative
+runtime budget, non-finite results fail closed, and JSON integer-form tokens
+outside `i64` are rejected rather than rounded to floats.
 
 ## Quick Start
 

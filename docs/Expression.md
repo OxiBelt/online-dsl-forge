@@ -36,6 +36,12 @@ if else for while do switch let const function import export new try catch throw
 true false null
 ```
 
+The same rules apply to identifier, member, function, method, and expression
+function parameter names in ASTs constructed through the public Rust types.
+The fallible formatter and semantic analyzer reject names that the lexer could
+not produce, including reserved words. They also reject non-finite `Float`
+values in directly constructed ASTs.
+
 ## Access and Calls
 
 ```text
@@ -56,6 +62,10 @@ literals and precompile them during semantic analysis; runtime handlers then use
 the verified precompiled cache through `RuntimeCallContext`. If a handler asks
 for a precompiled regex that was not admitted during analysis, evaluation fails
 closed.
+
+`Analyzer::with_regex_admission_limits` bounds unique literal patterns, their
+aggregate source bytes, and each compiled regex automaton before it is retained
+in the verified program.
 
 Non-WAF hosts should start with `SecurityProfile::generic_safe()` for ordinary
 filtering and decision expressions over host-provided JSON-like objects.
@@ -92,7 +102,8 @@ Precedence from highest to lowest:
 | `||` | boolean or |
 
 `&&` and `||` short-circuit. Arithmetic operators fail closed on invalid types,
-overflow, division by zero, or remainder by zero.
+integer or floating-point overflow, non-finite results, division by zero, or
+remainder by zero.
 
 ## Built-In CLI Runtime
 
@@ -129,3 +140,5 @@ Pattern-set helpers use receiver-method syntax such as
 `Request.Http.Path.containsAny("blocked-paths")` and
 `Request.Http.Path.matchesAny("blocked-paths")`. The compatibility schema does
 not register the stale `PatternSets.contains(name, value)` helper form.
+Hosts bound pattern-set count, per-pattern and aggregate source bytes, and
+approximate compiled-regex size when constructing the runtime registry.

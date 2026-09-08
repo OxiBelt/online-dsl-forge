@@ -71,7 +71,8 @@ optional `source_commit`. At most eight referenced files are admitted through
 Inspection, reference discovery, install rendering, and bundle rendering must
 return deterministic values or errors. The target calls every public
 `*_with_limits` renderer plus `render_text_with_limits` with selector-derived
-manifest, file, variable, placeholder, input, and output budgets.
+manifest, file, variable, structure, selector work, local option, override body,
+placeholder, input, and output budgets.
 
 ## Running and Reproducing
 

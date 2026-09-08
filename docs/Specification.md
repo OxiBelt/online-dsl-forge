@@ -107,6 +107,9 @@ the traversal is iterative and checks the complete shape before formatting.
 `format_expression` remains an infallible compatibility convenience, applies
 the same defaults, and returns an empty string if a directly constructed AST
 exceeds them. Use the fallible entry point when the caller needs a diagnostic.
+Both formatter entry points also validate every identifier, member, function,
+and method name against the lexer grammar and reserved-word list before emitting
+source, and reject non-finite floats in directly constructed ASTs.
 
 ## Semantic Validation
 
@@ -115,11 +118,11 @@ and security profile. Validation covers:
 
 - unknown variables unless explicitly allowed by `CompileOptions`
 - optional dialect restrictions, including the OxiRule V1 compatibility dialect
-- unknown functions
+- unknown functions unless explicitly retained as unresolved by `CompileOptions`
 - function arity
 - expression-function graph validation, including invalid parameters,
   recursion, and scoped local-over-global resolution
-- unknown methods unless explicitly allowed by `CompileOptions`
+- unknown methods unless explicitly retained as unresolved by `CompileOptions`
 - method arity when a method signature is registered
 - capability phase availability
 - request, response, and stream body-access inference
@@ -129,6 +132,8 @@ and security profile. Validation covers:
   `Stream.Payload`, or schema-declared payload body access, including through
   expression functions
 - regex admission policy and literal regex precompilation for strict profiles
+- aggregate limits on unique regexes and regex source bytes, plus a per-regex
+  compiled-automaton size limit
 - optional profile-level body-access limits
 - static AST node, call-depth, and cost limits
 
@@ -175,6 +180,30 @@ OxiRule compatibility, where function arguments are evaluated once and body
 origin inference still has to propagate through parameters such as
 `has_secret(Request.Body)`.
 
+Expression-function registration validates each function name, parameter list,
+and body before retaining or replacing it. `ExpressionFunctionLimits` bounds
+the complete schema with these defaults:
+
+| Field | Default |
+| --- | ---: |
+| `max_functions` | 1,024 |
+| `max_total_parameters` | 8,192 |
+| `max_total_name_bytes` | 1 MiB |
+| `max_total_body_nodes` | 65,536 |
+| `max_total_body_scalar_bytes` | 16 MiB |
+| `max_total_call_edges` | 65,536 |
+| `max_body_depth` | 128 |
+| `max_diagnostics` | 1,024 |
+| `max_total_diagnostic_bytes` | 1 MiB |
+
+Hosts can install lower bounds with
+`RuntimeSchema::with_expression_function_limits`. Semantic analysis revalidates
+the aggregate limits and syntax so schemas received through serialization do
+not bypass registration checks. Body depth remains hard-capped at 128, each
+diagnostic message at 1 KiB, and retained or cloned expression-function
+diagnostics at 1,024 messages and 1 MiB even when a schema requests higher
+settings.
+
 `RuntimeSchema::oxirule_waf()` and the `SecurityProfile::oxirule_waf_*`
 constructors provide the behavior-preserving OxiRule WAF migration surface. The
 compatibility profiles use the WAF phase/body/cost limits but keep
@@ -188,12 +217,24 @@ receiver-method expressions such as `Request.Http.Path.containsAny("set")`.
 `RuntimeSchema::oxirule_waf()` does not register the stale
 `PatternSets.contains(name, value)` helper alias.
 
+`RuntimePatternSetLimits::default()` admits at most 256 sets, 1,024 patterns
+per set, 4 KiB per pattern, and 64 MiB of aggregate pattern source. Regex
+patterns compile through `RegexBuilder` with a 256 KiB approximate compiled
+size limit per pattern and a 64 MiB aggregate projection across regex patterns.
+Hosts can install lower bounds with `RuntimePatternSets::compile_with_limits`.
+
 `SecurityProfile::generic_safe()` is the default non-WAF embedding profile. It
 keeps `RegexPolicy::DynamicWithBudget` for compatibility, requires
 deterministic and side-effect-free capabilities, fails closed, and uses modest
 AST, call-depth, and static-cost budgets. Hosts that need stricter admission can
 derive from it with `with_regex_policy(RegexPolicy::LiteralOnlyPrecompiled)`,
 `deny_body_access()`, or `with_body_access_limit(...)`.
+
+`RegexAdmissionLimits::default()` admits at most 256 unique `(flavor, pattern)`
+pairs and 1 MiB of aggregate pattern source. Each compilation uses a 256 KiB
+`RegexBuilder` approximate size limit before cache retention, giving the default
+cache an approximate 64 MiB compiled-size ceiling. Hosts can select lower bounds
+with `Analyzer::with_regex_admission_limits`.
 
 `SecurityProfile::generic_transform()` is for non-WAF transformation and
 normalization workloads. It keeps the same deterministic and fail-closed
@@ -221,6 +262,11 @@ nodes in call-frame mode; neither form becomes a runtime host capability. A
 runtime context must provide registry metadata compatible with every verified
 capability ticket before evaluation begins.
 
+`CompileOptions` can retain an unknown function or method as an unresolved call
+for compatibility inspection. Unresolved calls cannot execute against a later
+runtime registry; callers must analyze the AST again against the concrete
+schema so capability metadata, regex policy, and body access are verified.
+
 ## Runtime Evaluation
 
 Runtime evaluation receives a compiled expression or verified program, a
@@ -241,14 +287,15 @@ The runtime:
   dynamic registry
 - passes a `RuntimeCallContext` to context-aware function and method handlers so
   they can inspect the active security profile and use verified precompiled
-  regex literals
+  regex literals or charge input-dependent handler work before performing it
 - enforces step and recursion-depth limits
 - validates every input, local, member copy, handler result, operator result,
   intermediate value, and returned value before further use
 - meters value depth, nodes, collection items, logical bytes, and cumulative
-  logical bytes processed by one evaluation
+  logical bytes and crate-owned handler work processed by one evaluation
 - fails closed on unknown names, type errors, arity errors, arithmetic
-  overflow, division by zero, budget exhaustion, and missing object members
+  overflow or non-finite results, division by zero, budget exhaustion, and
+  missing object members
 - short-circuits `&&` and `||`
 
 Handlers registered with `register_function_with_context`,
@@ -260,9 +307,17 @@ for literals admitted and compiled during semantic analysis. If a handler
 requires a precompiled regex for a dynamic pattern or for a literal that was not
 part of the verified program, evaluation fails closed with an `EvalError`.
 `RegexFlavor::HeaderName` regexes are compiled case-insensitively.
+`precompiled_regex_is_match` charges candidate bytes multiplied by the admitted
+pattern's source-byte complexity before matching.
+The built-in OxiRule `containsAny` and `matchesAny` handlers project and charge
+the complete workload before scanning, including every string item in an array
+receiver. The projection multiplies the candidate bytes by the sum of each
+pattern's source bytes plus one, so both candidate volume and pattern-set
+complexity consume the cumulative work budget.
 
-Runtime values are JSON-compatible: null, booleans, integers, floats, strings,
-arrays, and objects.
+Runtime values are JSON-compatible: null, booleans, integers, finite floats,
+strings, arrays, and objects. Floating arithmetic and handler results that
+produce infinity or NaN fail admission instead of becoming JSON `null`.
 
 | `RuntimeResourceLimits` field | Default |
 | --- | ---: |
@@ -270,7 +325,7 @@ arrays, and objects.
 | `max_value_nodes` | 262,144 per graph |
 | `max_value_items` | 262,144 per graph |
 | `max_value_bytes` | 64 MiB per graph |
-| `max_total_value_bytes` | 64 MiB per evaluation |
+| `max_total_value_bytes` | 64 MiB of values and charged handler work per evaluation |
 
 Logical bytes include one tag byte per node plus string payloads and object
 keys. `MapRuntime::from_json_bindings` applies these defaults while converting
@@ -290,6 +345,9 @@ before the crate can inspect its returned value. Custom contexts that expose
 untrusted or large graphs should implement the borrowed method or enforce an
 equivalent host-side bound. Host function and method execution itself also
 remains host-owned work; returned values are checked before reuse.
+Raw regex references exposed through `RuntimeCallContext` are a host integration
+surface and cannot meter arbitrary host loops. Context-aware handlers should use
+`precompiled_regex_is_match` or call `charge_work` before matching directly.
 
 Compiled expressions are validation artifacts. Host applications should parse
 and analyze expressions through `online-dsl-forge`; they should not treat
@@ -355,10 +413,25 @@ same policy to embeddings. Limits are inclusive.
 | `max_variable_value_bytes` | 1 MiB |
 | `max_total_variable_bytes` | 8 MiB |
 | `max_variables` | 4,096 |
+| `max_profile_assignments` | 262,144 assignments across profiles |
 | `max_rulepack_files` | 4,096 rules and group files |
+| `max_overrides` | 4,096 manifest and local overrides |
+| `max_exceptions` | 4,096 manifest and local exceptions |
+| `max_selector_work` | 16,777,216 selector comparisons |
+| `max_local_option_bytes` | 16 MiB |
+| `max_override_body_bytes` | 8 MiB per body |
 | `max_placeholders` | 262,144 |
 | `max_total_input_bytes` | 64 MiB |
 | `max_total_output_bytes` | 64 MiB of output and retained render work |
+
+Manifest and local override or exception counts share their respective limits.
+The local option budget charges 512 logical bytes for each local override or
+exception and 32 bytes for each string list item, in addition to string bytes.
+Selector work is charged for preflight and
+application, and projected action body copies and serialized output are charged
+before an override copies a body into any rule. Local exception insertion,
+variable pinning, mode and provenance updates, and final serialization are
+projected before those option mutations grow the retained TOML graph.
 
 The built-in memory and blob resolvers lend content to the renderer so it can
 check a file before copying it. A custom `FileResolver` remains source
@@ -367,8 +440,9 @@ inside that host implementation precedes crate-owned checks. Implement
 `resolve_file_borrowed` when the resolver already stores content in memory.
 
 `render_text_with_limits` applies strict marker validation and the same
-single-pass behavior. The infallible `render_text` function remains a legacy
-single-pass convenience for trusted templates and variables.
+single-pass behavior. The infallible `render_text` function retains the legacy
+marker behavior, applies the default limits, and returns an empty string when
+admission or rendering exceeds a limit.
 
 ## CLI
 
