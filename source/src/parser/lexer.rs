@@ -155,6 +155,7 @@ impl Lexer<'_> {
       }
 
       if ch == '\\' {
+        let escape_start = self.position;
         self.advance_char();
         let Some(escaped) = self.peek_char() else {
           break;
@@ -167,7 +168,10 @@ impl Lexer<'_> {
           'n' => self.push_scalar(&mut value, '\n', start),
           'r' => self.push_scalar(&mut value, '\r', start),
           't' => self.push_scalar(&mut value, '\t', start),
-          other => self.push_scalar(&mut value, other, start),
+          _ => self.push_diagnostic(Diagnostic::new(
+            "unsupported string escape",
+            SourceSpan::new(escape_start, self.position),
+          )),
         }
       } else {
         self.push_scalar(&mut value, ch, start);

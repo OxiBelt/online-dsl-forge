@@ -94,6 +94,71 @@ fn parser_api_reports_diagnostics() {
 }
 
 #[test]
+fn parser_api_rejects_unsupported_string_escapes_at_their_source_spans() {
+  let input = r#""\.é\q""#;
+  let error = parse_expression(input).expect_err("unsupported escapes must fail closed");
+  assert_eq!(error.diagnostics.len(), 2);
+  assert_eq!(error.diagnostics[0].message, "unsupported string escape");
+  assert_eq!(error.diagnostics[0].span, SourceSpan::new(1, 3));
+  assert_eq!(error.diagnostics[1].message, "unsupported string escape");
+  assert_eq!(error.diagnostics[1].span, SourceSpan::new(5, 7));
+}
+
+#[test]
+fn parser_api_keeps_the_six_documented_string_escapes() {
+  let cases = [
+    (r#""\\""#, "\\"),
+    (r#""\"""#, "\""),
+    (r#""\'""#, "'"),
+    (r#""\n""#, "\n"),
+    (r#""\r""#, "\r"),
+    (r#""\t""#, "\t"),
+  ];
+  for (source, expected) in cases {
+    let ast = parse_expression(source).expect("documented escape should parse");
+    let ExprKind::String { value } = ast.kind else {
+      panic!("expected string literal");
+    };
+    assert_eq!(value, expected);
+  }
+}
+
+#[test]
+fn parser_api_preserves_doubled_backslashes_in_regex_literals_and_formatting() {
+  let input = r#"Request.Http.Path.matches("\\.\\.")"#;
+  let ast = parse_expression(input).expect("doubled backslashes should parse");
+  let ExprKind::MethodCall { args, .. } = &ast.kind else {
+    panic!("expected regex method call");
+  };
+  let ExprKind::String { value } = &args[0].kind else {
+    panic!("expected string regex argument");
+  };
+  assert_eq!(value, r"\.\.");
+  let formatted = format_expression(&ast);
+  assert_eq!(formatted, input);
+  assert_eq!(
+    format_expression(&parse_expression(&formatted).unwrap()),
+    input
+  );
+}
+
+#[test]
+fn parser_api_bounds_unsupported_escape_diagnostics() {
+  let input = r#""\a\b\c""#;
+  let error = parse_expression_with_limits(
+    input,
+    ParseLimits {
+      max_diagnostics: 2,
+      ..ParseLimits::default()
+    },
+  )
+  .expect_err("diagnostics should stop at the configured limit");
+  assert_eq!(error.diagnostics.len(), 1);
+  assert_eq!(error.diagnostics[0].message, "diagnostic limit exceeded");
+  assert_eq!(error.diagnostics[0].span, SourceSpan::new(5, 7));
+}
+
+#[test]
 fn parser_api_rejects_excessive_recursive_nesting() {
   let cases = [
     ("unary operators", format!("{}true", "!".repeat(300))),

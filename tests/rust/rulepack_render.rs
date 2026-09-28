@@ -339,11 +339,11 @@ fn typed_when_rendering_contains_injection_payload_as_string_data() {
 }
 
 #[test]
-fn escaped_dsl_braces_are_counted_as_decoded_placeholders() {
+fn dsl_string_placeholders_are_counted_after_parsing() {
   let manifest = manifest_with_rule_path("route_name");
   let resolver = MemoryFileResolver::new().with_file(
     "rules/login.oxirule.toml",
-    r#"when = "Context.RouteName == '{\\{route_name\\}\\}'"
+    r#"when = "Context.RouteName == '{{route_name}}'"
 "#,
   );
   let options = RulepackRenderOptions {
@@ -379,6 +379,26 @@ fn escaped_dsl_braces_are_counted_as_decoded_placeholders() {
     file.get("when").and_then(toml::Value::as_str),
     Some("Context.RouteName == \"vault\"")
   );
+}
+
+#[test]
+fn unsupported_escapes_in_rulepack_when_expressions_fail_closed() {
+  let resolver = MemoryFileResolver::new().with_file(
+    "rules/login.oxirule.toml",
+    r#"when = "Context.RouteName == '\\{route_name}'"
+"#,
+  );
+  let error = render_rulepack_bundle(
+    &manifest_with_rule_path("route_name"),
+    "test rulepack",
+    RulepackRenderOptions {
+      variables: BTreeMap::from([("route_name".to_string(), "vault".to_string())]),
+      ..RulepackRenderOptions::default()
+    },
+    &resolver,
+  )
+  .expect_err("unsupported DSL escape should reject the rulepack");
+  assert!(error.to_string().contains("unsupported string escape"));
 }
 
 #[test]

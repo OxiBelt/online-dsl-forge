@@ -16,6 +16,9 @@ false
 ```
 
 Strings support `\\`, `\"`, `\'`, `\n`, `\r`, and `\t` escapes.
+Other escapes, such as `\.`, fail with an `unsupported string escape`
+diagnostic. To pass a backslash to a regex, write `\\` in the DSL string;
+for example, `"\\."` denotes a regex that matches a literal dot.
 Float literals must resolve to finite `f64` values. Decimal literals outside
 that range fail with an `invalid float literal` diagnostic.
 
