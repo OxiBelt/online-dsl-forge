@@ -269,6 +269,9 @@ fn reject_markers_outside_strings(
   source: &str,
 ) -> RenderResult<()> {
   let mut cursor = 0usize;
+  // collect_string_spans visits leaves in source order. Advance past each
+  // string once instead of scanning every string for every placeholder.
+  let mut span_index = 0usize;
   while let Some(offset) = raw[cursor..].find("{{") {
     let start = cursor + offset;
     let end = raw[start + 2..]
@@ -279,9 +282,15 @@ fn reject_markers_outside_strings(
           "{source} contains malformed placeholder marker"
         ))
       })?;
+    while string_spans
+      .get(span_index)
+      .is_some_and(|span| span.end <= start)
+    {
+      span_index += 1;
+    }
     if !string_spans
-      .iter()
-      .any(|span| start > span.start && end < span.end)
+      .get(span_index)
+      .is_some_and(|span| start > span.start && end < span.end)
     {
       return fail(format!(
         "{source} when expression placeholder must be inside a string literal"
@@ -362,5 +371,24 @@ fn format_limits(meter: &RenderMeter) -> AstFormatLimits {
   AstFormatLimits {
     max_output_bytes: meter.remaining_render_work(),
     ..AstFormatLimits::default()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn many_string_literals_and_late_placeholders_render_within_default_limits() {
+    let literals = vec!["'ok'"; 8_192].join(", ");
+    let markers = "{{x}}".repeat(8_192);
+    let raw = format!("[{literals}, '{markers}']");
+    let variables = BTreeMap::from([("x".to_string(), "ok".to_string())]);
+    let declared = HashSet::from(["x".to_string()]);
+    let mut meter = RenderMeter::new(Default::default());
+
+    let rendered = render_when(&raw, &variables, &declared, &mut meter, "test rule")
+      .expect("admitted placeholders must render");
+    assert!(rendered.ends_with(&format!("\"{}\"]", "ok".repeat(8_192))));
   }
 }
