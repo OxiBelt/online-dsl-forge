@@ -16,7 +16,7 @@
     "semver": "^7.8.5",
     "smol-toml": "^1.8.0",
     "tsx": "^4.23.13",
-    "zod": "^4.5.4"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
