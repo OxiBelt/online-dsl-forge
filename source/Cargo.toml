@@ -17,7 +17,7 @@ toml = "1.1.5"
 
 [dev-dependencies]
 arbitrary = "1.4.2"
-serde-saphyr = { version = "1.2.0", default-features = false, features = ["deserialize"] }
+serde-saphyr = { version = "2.0.0", default-features = false, features = ["deserialize"] }
 
 [[bin]]
 name = "online-dsl-forgectl"
