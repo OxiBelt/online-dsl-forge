@@ -14,6 +14,10 @@ and CLI tooling.
 
 ## Capabilities
 
+String literals preserve unknown backslash escapes while retaining existing
+escape meanings. See [TOML and regex escaping](docs/Expression.md#regex-patterns-embedded-in-toml)
+for examples and compatibility details.
+
 - Single publishable `online-dsl-forge` crate containing the parser, semantic
   analyzer, runtime, and CLI.
 - Handwritten lexer, recursive-descent expression parser, AST, diagnostics,

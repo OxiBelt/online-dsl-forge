@@ -1026,6 +1026,49 @@ fn context_aware_method_uses_precompiled_regex() {
 }
 
 #[test]
+fn literal_dot_regexes_survive_toml_and_use_precompiled_runtime_matching() {
+  let basic = r#"when = "name.matches('(^|/)\\.\\.(/|$)')""#;
+  let literal = r#"when = '''name.matches('(^|/)\.\.(/|$)')'''"#;
+  let expressions = [basic, literal].map(|source| {
+    let config: toml::Value = toml::from_str(source).unwrap();
+    config["when"].as_str().unwrap().to_string()
+  });
+  assert_eq!(expressions[0], expressions[1]);
+  for expression in expressions.iter().map(String::as_str).chain([
+    r"name.matches('(^|/)[.][.](/|$)')",
+    r"name.matches('(^|/)..(/|$)')",
+  ]) {
+    for path in ["/locales/en/messages.json", "/en/", "..", "/../", "/a/../b"] {
+      let runtime = MapRuntime::new(
+        BTreeMap::from([("name".to_string(), Value::String(path.to_string()))]),
+        regex_registry(),
+      );
+      let ast = parse_expression(expression).unwrap();
+      let verified = Analyzer::new(SecurityProfile::waf_request())
+        .analyze(&ast, &runtime.schema())
+        .unwrap();
+      assert_eq!(verified.regex_cache().len(), 1);
+      let expected = expression.contains("/)..(") || path.contains("..");
+      assert_eq!(
+        evaluate_verified(&verified, &runtime, EvalLimits::default()).unwrap(),
+        Value::Bool(expected),
+        "{expression}: {path}"
+      );
+    }
+  }
+  let runtime = MapRuntime::new(
+    BTreeMap::from([("name".to_string(), Value::String("test".to_string()))]),
+    regex_registry(),
+  );
+  let ast = parse_expression(r"name.matches('\q')").expect("string syntax accepts unknown escapes");
+  let error = Analyzer::new(SecurityProfile::waf_request())
+    .analyze(&ast, &runtime.schema())
+    .expect_err("invalid regex must fail admission");
+  assert!(error.to_string().contains("invalid regex pattern"));
+  assert!(toml::from_str::<toml::Value>(r#"when = "name.matches('\.')""#).is_err());
+}
+
+#[test]
 fn context_aware_method_fails_closed_on_missing_precompiled_regex() {
   let ast = parse_expression("name.matches(pattern)").expect("expression should parse");
   let mut variables = BTreeMap::new();

@@ -16,9 +16,52 @@ false
 ```
 
 Strings support `\\`, `\"`, `\'`, `\n`, `\r`, and `\t` escapes.
-Other escapes, such as `\.`, fail with an `unsupported string escape`
-diagnostic. To pass a backslash to a regex, write `\\` in the DSL string;
-for example, `"\\."` denotes a regex that matches a literal dot.
+All other escapes retain the backslash and following character verbatim in either
+quote style, including `\.`, `\d`, `\b`, `\p{L}`, and `\q`. Previously these
+were rejected. Existing escapes keep their meanings: `\n` is a newline, so use
+`\\n` to pass that regex escape. Unterminated strings still fail parsing.
+Canonical formatting doubles literal backslashes and preserves the decoded
+value on reparsing. Regex admission still rejects invalid patterns such as `\q`.
+
+### Regex patterns embedded in TOML
+
+TOML decodes configuration strings before the DSL parser sees the expression.
+These spellings produce the same DSL expression and literal-dot regex:
+
+```toml
+when = """
+Request.Http.Path.matches('(^|/)\\.\\.(/|$)')
+"""
+```
+
+```toml
+when = '''
+Request.Http.Path.matches('(^|/)\.\.(/|$)')
+'''
+```
+
+TOML basic strings require doubled backslashes. TOML literal strings preserve
+backslashes. A single `\.` in a TOML basic string is invalid TOML; DSL single
+quotes inside it do not change TOML's escaping rules.
+
+A backslash-free alternative works with either TOML style:
+
+```toml
+when = """
+Context.RouteName != null &&
+Context.RouteName.startsWith('example') &&
+Request.Http.Path.matches('(^|/)[.][.](/|$)')
+"""
+```
+
+The regex `..` means two arbitrary characters and matches `en` in
+`/locales/en/messages.json`. The corrected patterns match a literal `..` path
+segment, such as `/a/../b`. They do not decode or normalize host-provided paths.
+Hosts such as OxiBelt must adopt the updated library before using newly accepted
+escapes. The character-class alternative also works with previous string syntax.
+
+### Numeric and resource limits
+
 Float literals must resolve to finite `f64` values. Decimal literals outside
 that range fail with an `invalid float literal` diagnostic.
 

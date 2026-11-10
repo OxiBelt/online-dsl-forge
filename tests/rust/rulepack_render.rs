@@ -382,13 +382,13 @@ fn dsl_string_placeholders_are_counted_after_parsing() {
 }
 
 #[test]
-fn unsupported_escapes_in_rulepack_when_expressions_fail_closed() {
+fn unknown_escapes_in_rulepack_when_expressions_are_preserved() {
   let resolver = MemoryFileResolver::new().with_file(
     "rules/login.oxirule.toml",
     r#"when = "Context.RouteName == '\\{route_name}'"
 "#,
   );
-  let error = render_rulepack_bundle(
+  let bundle = render_rulepack_bundle(
     &manifest_with_rule_path("route_name"),
     "test rulepack",
     RulepackRenderOptions {
@@ -397,8 +397,56 @@ fn unsupported_escapes_in_rulepack_when_expressions_fail_closed() {
     },
     &resolver,
   )
-  .expect_err("unsupported DSL escape should reject the rulepack");
-  assert!(error.to_string().contains("unsupported string escape"));
+  .expect("unknown escapes should remain string data");
+  let file: toml::Value = toml::from_str(&bundle.files[0].content).unwrap();
+  let ast = online_dsl_forge::parse_expression(file["when"].as_str().unwrap()).unwrap();
+  let online_dsl_forge::ExprKind::Binary { right, .. } = ast.kind else {
+    panic!("expected equality");
+  };
+  let online_dsl_forge::ExprKind::String { value } = right.kind else {
+    panic!("expected string");
+  };
+  assert_eq!(value, r"\{route_name}");
+}
+
+#[test]
+fn literal_dot_patterns_survive_multiline_toml_rendering() {
+  let basic = r#"when = """
+Request.Http.Path.matches('(^|/)\\.\\.(/|$)')
+""""#;
+  let literal = r#"when = '''
+Request.Http.Path.matches('(^|/)\.\.(/|$)')
+'''"#;
+  let mut outputs = Vec::new();
+  for source in [basic, literal] {
+    let resolver = MemoryFileResolver::new().with_file("rules/login.oxirule.toml", source);
+    let bundle = render_rulepack_bundle(
+      &manifest_with_rule_path("route_name"),
+      "test rulepack",
+      RulepackRenderOptions {
+        variables: BTreeMap::from([("route_name".to_string(), "example".to_string())]),
+        ..RulepackRenderOptions::default()
+      },
+      &resolver,
+    )
+    .unwrap();
+    let file: toml::Value = toml::from_str(&bundle.files[0].content).unwrap();
+    let when = file["when"].as_str().unwrap();
+    let ast = online_dsl_forge::parse_expression(when).unwrap();
+    assert_eq!(online_dsl_forge::format_expression(&ast), when);
+    let online_dsl_forge::ExprKind::MethodCall { args, .. } = ast.kind else {
+      panic!("expected regex call");
+    };
+    let online_dsl_forge::ExprKind::String { value } = &args[0].kind else {
+      panic!("expected pattern");
+    };
+    assert_eq!(value, r"(^|/)\.\.(/|$)");
+    let regex = regex::Regex::new(value).unwrap();
+    assert!(!regex.is_match("/locales/en/messages.json"));
+    assert!(regex.is_match("/a/../b"));
+    outputs.push(when.to_string());
+  }
+  assert_eq!(outputs[0], outputs[1]);
 }
 
 #[test]

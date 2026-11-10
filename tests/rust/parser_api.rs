@@ -94,14 +94,53 @@ fn parser_api_reports_diagnostics() {
 }
 
 #[test]
-fn parser_api_rejects_unsupported_string_escapes_at_their_source_spans() {
-  let input = r#""\.é\q""#;
-  let error = parse_expression(input).expect_err("unsupported escapes must fail closed");
-  assert_eq!(error.diagnostics.len(), 2);
-  assert_eq!(error.diagnostics[0].message, "unsupported string escape");
-  assert_eq!(error.diagnostics[0].span, SourceSpan::new(1, 3));
-  assert_eq!(error.diagnostics[1].message, "unsupported string escape");
-  assert_eq!(error.diagnostics[1].span, SourceSpan::new(5, 7));
+fn parser_api_preserves_unknown_escapes_and_round_trips() {
+  for quote in ['\'', '"'] {
+    for content in [r"\.\d\b\p{L}\q", r"\é", "\\\n"] {
+      let source = format!("{quote}{content}{quote}");
+      let ast = parse_expression(&source).expect("unknown escapes are literal data");
+      let ExprKind::String { value } = &ast.kind else {
+        panic!("expected string");
+      };
+      assert_eq!(value, content);
+      let formatted = format_expression(&ast);
+      let reparsed = parse_expression(&formatted).unwrap();
+      assert_eq!(format_expression(&reparsed), formatted);
+      assert_eq!(reparsed.kind, ast.kind);
+      let json = serde_json::to_string(&ast).unwrap();
+      let restored: online_dsl_forge::AstExpression = serde_json::from_str(&json).unwrap();
+      assert_eq!(restored, ast);
+    }
+  }
+}
+
+#[test]
+fn parser_api_charges_both_unknown_escape_characters_before_retaining_them() {
+  for (source, bytes) in [(r#""\.""#, 2), (r#""\é""#, 3)] {
+    for limit in [0, bytes - 1, bytes] {
+      let result = parse_expression_with_limits(
+        source,
+        ParseLimits {
+          max_decoded_scalar_bytes: limit,
+          ..ParseLimits::default()
+        },
+      );
+      if limit == bytes {
+        assert!(result.is_ok());
+      } else {
+        let error = result.unwrap_err();
+        assert_eq!(error.diagnostics.len(), 1);
+        assert!(error.diagnostics[0].message.contains("scalar"));
+        assert_eq!(
+          error.diagnostics[0].span,
+          SourceSpan::new(0, source.len() - 1)
+        );
+      }
+    }
+  }
+  for source in ["\"abc\\", "'abc\\", "\"\\q", "'\\é"] {
+    assert!(parse_expression(source).is_err(), "{source:?}");
+  }
 }
 
 #[test]
@@ -143,8 +182,8 @@ fn parser_api_preserves_doubled_backslashes_in_regex_literals_and_formatting() {
 }
 
 #[test]
-fn parser_api_bounds_unsupported_escape_diagnostics() {
-  let input = r#""\a\b\c""#;
+fn parser_api_bounds_invalid_character_diagnostics() {
+  let input = "@ @ @";
   let error = parse_expression_with_limits(
     input,
     ParseLimits {
@@ -155,7 +194,7 @@ fn parser_api_bounds_unsupported_escape_diagnostics() {
   .expect_err("diagnostics should stop at the configured limit");
   assert_eq!(error.diagnostics.len(), 1);
   assert_eq!(error.diagnostics[0].message, "diagnostic limit exceeded");
-  assert_eq!(error.diagnostics[0].span, SourceSpan::new(5, 7));
+  assert_eq!(error.diagnostics[0].span, SourceSpan::new(4, 5));
 }
 
 #[test]

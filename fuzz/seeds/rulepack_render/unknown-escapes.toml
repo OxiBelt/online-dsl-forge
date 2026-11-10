@@ -1,0 +1,13 @@
+00[rulepack]
+schema_version = 2
+name = "escape-example"
+version = "0.1.0"
+
+[[rules]]
+name = "literal-dots"
+phase = "request"
+priority = 100
+path = "rules/dots.oxirule.toml"
+
+---FILES---
+{"files": {"rules/dots.oxirule.toml": "when = \"\"\"\nRequest.Http.Path.matches('(^|/)\\\\.\\\\.(/|$)')\n\"\"\"\n"}}
