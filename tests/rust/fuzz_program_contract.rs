@@ -406,7 +406,7 @@ fn fuzz_workflows_cover_every_target_and_profile_with_pinned_actions() {
   assert_eq!(smoke_upload["if"].as_str(), Some("failure()"));
   assert_eq!(
     smoke_upload["uses"].as_str(),
-    Some("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a")
+    Some("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9")
   );
   assert_eq!(smoke_upload["with"]["retention-days"].as_u64(), Some(90));
 
@@ -475,7 +475,7 @@ fn fuzz_workflows_cover_every_target_and_profile_with_pinned_actions() {
   for upload in [coverage_upload, corpus_upload, failure_upload] {
     assert_eq!(
       upload["uses"].as_str(),
-      Some("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a")
+      Some("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9")
     );
   }
   assert_eq!(coverage_upload["with"]["retention-days"].as_u64(), Some(30));
