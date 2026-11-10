@@ -8,11 +8,11 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = "1.4.2"
+arbitrary = "1.5.0"
 libfuzzer-sys = "0.4.13"
 online-dsl-forge = { path = "../source" }
 serde = "1.0.229"
-serde_json = { version = "1.0.151", features = ["arbitrary_precision", "float_roundtrip"] }
+serde_json = { version = "1.0.154", features = ["arbitrary_precision", "float_roundtrip"] }
 
 [[bin]]
 name = "dsl_expression"

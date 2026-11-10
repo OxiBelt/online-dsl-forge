@@ -2,7 +2,7 @@
 name = "online-dsl-forge"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99.1"
 license = "Apache-2.0"
 description = "A bounded parser and runtime for in-memory DSL expressions."
 repository = "https://github.com/OxiBelt/online-dsl-forge"
@@ -12,12 +12,12 @@ publish = false
 [dependencies]
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.151", features = ["arbitrary_precision", "float_roundtrip"] }
-toml = "1.1.5"
+serde_json = { version = "1.0.154", features = ["arbitrary_precision", "float_roundtrip"] }
+toml = "1.2.1"
 
 [dev-dependencies]
-arbitrary = "1.4.2"
-serde-saphyr = { version = "1.2.0", default-features = false, features = ["deserialize"] }
+arbitrary = "1.5.0"
+serde-saphyr = { version = "2.1.1", default-features = false, features = ["deserialize"] }
 
 [[bin]]
 name = "online-dsl-forgectl"

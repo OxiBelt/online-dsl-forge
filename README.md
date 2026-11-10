@@ -1,5 +1,7 @@
 # online-dsl-forge
 
+Requires Rust `1.99.1` or newer.
+
 `online-dsl-forge` is a single publishable Rust crate for parsing,
 canonicalizing, semantically validating, compiling, and evaluating a small
 bounded DSL expression language in memory.

@@ -48,8 +48,9 @@ be committed.
 5. Run the relevant checks and mention any checks that could not be run.
 6. Verify that generated test data and temporary files are cleaned up.
 
-When changing Rust code, prefer workspace-level commands from the repository
-root:
+Rust development and release checks use Rust `1.99.1`, which is also the
+minimum supported Rust version. When changing Rust code, prefer workspace-level
+commands from the repository root:
 
 ```sh
 cargo fmt --check

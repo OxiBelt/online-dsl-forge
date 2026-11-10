@@ -65,7 +65,7 @@ jobs:
         run: tests/scripts/check-rust-module-size.sh
 
   test:
-    name: Test with rust-1.98.1
+    name: Test with rust-1.99.1
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -76,9 +76,9 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
-          rustup component add rustfmt clippy --toolchain 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
+          rustup component add rustfmt clippy --toolchain 1.99.1
 
       - name: Cargo fmt
         run: cargo fmt --check
@@ -103,9 +103,9 @@ jobs:
       matrix:
         fuzz_profile:
           - name: stable
-            toolchain: 1.98.1
+            toolchain: 1.99.1
           - name: asan
-            toolchain: nightly-2026-09-08
+            toolchain: nightly-2026-11-10
         fuzz_target:
           - dsl_expression
           - expression_pipeline
@@ -161,12 +161,12 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Install Rust advisory tools
         run: |
-          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-audit --version 0.23.0 --locked
           cargo install cargo-deny --version 0.20.2 --locked
 
       - name: Cargo audit
